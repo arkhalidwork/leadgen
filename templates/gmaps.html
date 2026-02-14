@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}LeadGen — Google Maps Scraper{% endblock %}
+
+{% block content %}
+<!-- Search Form Card -->
+<div class="row justify-content-center mb-5">
+  <div class="col-lg-8">
+    <div class="card shadow-lg border-0">
+      <div class="card-body p-4 p-md-5">
+        <h2 class="card-title text-center mb-2">
+          <i class="bi bi-geo-alt-fill text-primary me-2"></i>Google Maps Lead Generator
+        </h2>
+        <p class="text-center text-muted mb-4">
+          Search Google Maps for businesses and export their contact info as CSV
+        </p>
+
+        <form id="scrapeForm">
+          <div class="row g-3">
+            <div class="col-md-5">
+              <label for="keyword" class="form-label fw-semibold">
+                <i class="bi bi-tag me-1"></i>Business Type / Keyword
+              </label>
+              <input type="text" class="form-control form-control-lg" id="keyword"
+                placeholder="e.g. restaurants, dentists, plumbers" required />
+            </div>
+            <div class="col-md-5">
+              <label for="place" class="form-label fw-semibold">
+                <i class="bi bi-pin-map me-1"></i>Location / Place
+              </label>
+              <input type="text" class="form-control form-control-lg" id="place"
+                placeholder="e.g. New York, London, Mumbai" required />
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+              <button type="submit" class="btn btn-primary btn-lg w-100" id="btnScrape">
+                <i class="bi bi-rocket-takeoff me-1"></i>Go
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div class="text-center mt-3">
+          <small class="text-muted">
+            Search query: "<span id="previewQuery" class="fst-italic">keyword in place</span>"
+          </small>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Progress Section -->
+<div class="row justify-content-center mb-4" id="progressSection" style="display: none">
+  <div class="col-lg-8">
+    <div class="card border-0 shadow">
+      <div class="card-body p-4">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+          <h5 class="mb-0">
+            <span class="spinner-border spinner-border-sm text-primary me-2" id="progressSpinner"></span>
+            <span id="progressTitle">Scraping in progress...</span>
+          </h5>
+          <button class="btn btn-outline-danger btn-sm" id="btnStop" title="Stop Scraping">
+            <i class="bi bi-stop-circle me-1"></i>Stop
+          </button>
+        </div>
+        <div class="progress mb-2" style="height: 8px">
+          <div class="progress-bar progress-bar-striped progress-bar-animated" id="progressBar" role="progressbar"
+            style="width: 0%"></div>
+        </div>
+        <small class="text-muted" id="progressMessage">Starting...</small>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Results Section -->
+<div class="row justify-content-center" id="resultsSection" style="display: none">
+  <div class="col-lg-11">
+    <!-- Results Header -->
+    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+      <h4 class="mb-0">
+        <i class="bi bi-table me-2"></i>Results
+        <span class="badge bg-primary ms-2" id="resultCount">0</span>
+      </h4>
+      <div class="d-flex gap-2">
+        <input type="text" class="form-control form-control-sm" id="filterInput"
+          placeholder="Filter results..." style="width: 200px" />
+        <button class="btn btn-success btn-sm" id="btnDownload">
+          <i class="bi bi-download me-1"></i>Download CSV
+        </button>
+      </div>
+    </div>
+
+    <!-- Results Table -->
+    <div class="card border-0 shadow">
+      <div class="table-responsive">
+        <table class="table table-hover mb-0" id="resultsTable">
+          <thead class="table-dark">
+            <tr>
+              <th>#</th>
+              <th>Business Name</th>
+              <th>Owner</th>
+              <th>Phone</th>
+              <th>Email</th>
+              <th>Website</th>
+              <th>Socials</th>
+              <th>Address</th>
+              <th>Rating</th>
+              <th>Reviews</th>
+              <th>Category</th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Error Alert -->
+<div class="row justify-content-center" id="errorSection" style="display: none">
+  <div class="col-lg-8">
+    <div class="alert alert-danger d-flex align-items-center" role="alert">
+      <i class="bi bi-exclamation-triangle-fill me-2 fs-4"></i>
+      <div id="errorMessage"></div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+{% endblock %}

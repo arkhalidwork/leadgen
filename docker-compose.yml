@@ -1,0 +1,14 @@
+services:
+  leadgen:
+    build: .
+    container_name: leadgen-app
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./output:/app/output
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    # Chrome needs extra shared memory
+    shm_size: "2gb"

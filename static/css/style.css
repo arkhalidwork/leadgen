@@ -1,0 +1,317 @@
+/* LeadGen Custom Styles */
+
+:root {
+  --accent: #4f8cff;
+  --accent-hover: #3a72e0;
+}
+
+body {
+  background-color: #0f1117;
+  font-family:
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+main {
+  flex: 1;
+}
+
+/* Navbar */
+.navbar {
+  background-color: #161822;
+  border-color: #2a2d3e !important;
+}
+
+.navbar-brand {
+  font-size: 1.4rem;
+  letter-spacing: -0.5px;
+}
+
+/* Cards */
+.card {
+  background-color: #1a1d2e;
+  border-radius: 16px;
+}
+
+.card-title {
+  color: #e0e0e0;
+}
+
+/* Form Controls */
+.form-control {
+  background-color: #232740;
+  border: 1px solid #2e3354;
+  color: #e0e0e0;
+  border-radius: 10px;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+
+.form-control:focus {
+  background-color: #282d4a;
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.15);
+}
+
+.form-control::placeholder {
+  color: #6c7293;
+}
+
+.form-label {
+  color: #a0a4c0;
+  font-size: 0.875rem;
+}
+
+/* Primary Button */
+.btn-primary {
+  background: linear-gradient(135deg, var(--accent), #6a5aff);
+  border: none;
+  border-radius: 10px;
+  font-weight: 600;
+  transition:
+    transform 0.15s,
+    box-shadow 0.2s;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, var(--accent-hover), #5a4ae0);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 15px rgba(79, 140, 255, 0.3);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  transform: none;
+}
+
+/* Success Button */
+.btn-success {
+  background: linear-gradient(135deg, #28a745, #20c997);
+  border: none;
+  border-radius: 8px;
+  font-weight: 600;
+}
+
+.btn-success:hover {
+  background: linear-gradient(135deg, #218838, #1baa80);
+  transform: translateY(-1px);
+}
+
+/* Progress */
+.progress {
+  background-color: #232740;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  background: linear-gradient(90deg, var(--accent), #6a5aff);
+  transition: width 0.4s ease;
+}
+
+/* Table */
+.table {
+  color: #c8cce0;
+  font-size: 0.9rem;
+}
+
+.table-dark {
+  --bs-table-bg: #1e2236;
+  --bs-table-color: #a0a4c0;
+}
+
+.table-dark th {
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.5px;
+  padding: 12px 16px;
+  border-color: #2e3354;
+}
+
+.table-hover tbody tr:hover {
+  background-color: rgba(79, 140, 255, 0.06);
+  color: #fff;
+}
+
+.table td {
+  padding: 10px 16px;
+  border-color: #232740;
+  vertical-align: middle;
+}
+
+.table td a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.table td a:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+}
+
+/* Badge */
+.badge.bg-primary {
+  background: linear-gradient(135deg, var(--accent), #6a5aff) !important;
+  font-weight: 600;
+  font-size: 0.85rem;
+  padding: 5px 12px;
+  border-radius: 20px;
+}
+
+/* Alert */
+.alert-danger {
+  background-color: #2a1520;
+  border-color: #5a2035;
+  color: #f0a0a0;
+  border-radius: 12px;
+}
+
+/* Footer */
+footer {
+  border-color: #2a2d3e !important;
+  background-color: #0f1117;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #1a1d2e;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a3d5e;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a4d6e;
+}
+
+/* Results row animation */
+#resultsBody tr {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Truncate long text in table cells */
+.cell-truncate {
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cell-truncate-sm {
+  max-width: 140px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Responsive tweaks */
+@media (max-width: 768px) {
+  .card-body {
+    padding: 1.5rem !important;
+  }
+
+  .btn-lg {
+    padding: 0.5rem 1rem;
+    font-size: 1rem;
+  }
+}
+
+/* =============================================
+   Dashboard — Tool Cards
+   ============================================= */
+
+.tool-card {
+  background: #1a1d2e;
+  border-radius: 18px;
+  transition:
+    transform 0.25s ease,
+    box-shadow 0.25s ease;
+  cursor: pointer;
+}
+
+.tool-card:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 12px 36px rgba(79, 140, 255, 0.18);
+}
+
+.tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  font-size: 1.8rem;
+}
+
+.tool-icon-maps {
+  background: linear-gradient(135deg, #4285F4, #34A853);
+  color: #fff;
+}
+
+.tool-icon-linkedin {
+  background: linear-gradient(135deg, #0A66C2, #0077B5);
+  color: #fff;
+}
+
+.tool-badge {
+  background-color: #232740 !important;
+  color: #a0a4c0 !important;
+  font-weight: 500;
+  border: 1px solid #2e3354;
+  font-size: 0.75rem;
+  padding: 4px 10px;
+}
+
+/* Stat Cards */
+.stat-card {
+  background: #1a1d2e;
+  border-radius: 14px;
+}
+
+.stat-number {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+/* Navbar active link */
+.navbar .nav-link.active {
+  color: var(--accent) !important;
+  font-weight: 600;
+}
+
+.navbar .nav-link {
+  color: #8e92b0;
+  transition: color 0.2s;
+}
+
+.navbar .nav-link:hover {
+  color: #fff;
+}

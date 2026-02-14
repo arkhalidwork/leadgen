@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}LeadGen — Dashboard{% endblock %}
+
+{% block content %}
+<!-- Hero -->
+<div class="text-center mb-5">
+  <h1 class="display-5 fw-bold mb-2">
+    <i class="bi bi-boxes text-primary me-2"></i>LeadGen Suite
+  </h1>
+  <p class="lead text-muted col-lg-8 mx-auto">
+    Powerful lead generation tools to find business contacts, emails, and social profiles from Google Maps and LinkedIn.
+  </p>
+</div>
+
+<!-- Tool Cards Grid -->
+<div class="row g-4 justify-content-center mb-5">
+  <!-- Google Maps Tool -->
+  <div class="col-md-6 col-lg-5">
+    <a href="/tools/google-maps" class="text-decoration-none">
+      <div class="card tool-card h-100 border-0 shadow-lg">
+        <div class="card-body p-4 p-lg-5 text-center">
+          <div class="tool-icon tool-icon-maps mb-3">
+            <i class="bi bi-geo-alt-fill"></i>
+          </div>
+          <h3 class="card-title fw-bold mb-2">Google Maps Scraper</h3>
+          <p class="text-muted mb-3">
+            Search businesses on Google Maps by keyword &amp; location. Extract contact details, emails, social profiles, and export as CSV.
+          </p>
+          <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+            <span class="badge tool-badge">Phone</span>
+            <span class="badge tool-badge">Email</span>
+            <span class="badge tool-badge">Website</span>
+            <span class="badge tool-badge">Socials</span>
+            <span class="badge tool-badge">Address</span>
+            <span class="badge tool-badge">Rating</span>
+          </div>
+          <span class="btn btn-primary btn-sm px-4">
+            <i class="bi bi-arrow-right me-1"></i>Open Tool
+          </span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- LinkedIn Tool -->
+  <div class="col-md-6 col-lg-5">
+    <a href="/tools/linkedin" class="text-decoration-none">
+      <div class="card tool-card h-100 border-0 shadow-lg">
+        <div class="card-body p-4 p-lg-5 text-center">
+          <div class="tool-icon tool-icon-linkedin mb-3">
+            <i class="bi bi-linkedin"></i>
+          </div>
+          <h3 class="card-title fw-bold mb-2">LinkedIn Scraper</h3>
+          <p class="text-muted mb-3">
+            Find people and companies on LinkedIn by niche &amp; location. Extract profiles, titles, company info, and export as CSV.
+          </p>
+          <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+            <span class="badge tool-badge">Profiles</span>
+            <span class="badge tool-badge">Companies</span>
+            <span class="badge tool-badge">Title</span>
+            <span class="badge tool-badge">Location</span>
+            <span class="badge tool-badge">Industry</span>
+            <span class="badge tool-badge">URL</span>
+          </div>
+          <span class="btn btn-primary btn-sm px-4">
+            <i class="bi bi-arrow-right me-1"></i>Open Tool
+          </span>
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+
+<!-- Stats / Quick Info -->
+<div class="row g-3 justify-content-center">
+  <div class="col-sm-6 col-md-3">
+    <div class="card stat-card border-0 text-center p-3">
+      <div class="stat-number text-primary">2</div>
+      <div class="text-muted small">Scraping Tools</div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-md-3">
+    <div class="card stat-card border-0 text-center p-3">
+      <div class="stat-number text-success">CSV</div>
+      <div class="text-muted small">Export Format</div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-md-3">
+    <div class="card stat-card border-0 text-center p-3">
+      <div class="stat-number" style="color:#E4405F">7+</div>
+      <div class="text-muted small">Social Platforms</div>
+    </div>
+  </div>
+  <div class="col-sm-6 col-md-3">
+    <div class="card stat-card border-0 text-center p-3">
+      <div class="stat-number" style="color:#f0c040">&#9889;</div>
+      <div class="text-muted small">Parallel Scraping</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
