@@ -1,12 +1,13 @@
 /**
- * LeadGen — LinkedIn Tool Frontend Logic
+ * LeadGen — Instagram Tool Frontend Logic
  */
 
 document.addEventListener("DOMContentLoaded", () => {
-  const form = document.getElementById("linkedinForm");
-  const nicheInput = document.getElementById("niche");
+  const form = document.getElementById("instagramForm");
+  const keywordsInput = document.getElementById("keywords");
   const placeInput = document.getElementById("place");
   const searchTypeSelect = document.getElementById("searchType");
+  const keywordsLabel = document.getElementById("keywordsLabel");
   const btnScrape = document.getElementById("btnScrape");
   const btnStop = document.getElementById("btnStop");
   const btnDownload = document.getElementById("btnDownload");
@@ -17,10 +18,10 @@ document.addEventListener("DOMContentLoaded", () => {
   const progressTitle = document.getElementById("progressTitle");
   const progressSpinner = document.getElementById("progressSpinner");
   const resultsSection = document.getElementById("resultsSection");
+  const emailsTableCard = document.getElementById("emailsTableCard");
   const profilesTableCard = document.getElementById("profilesTableCard");
-  const companiesTableCard = document.getElementById("companiesTableCard");
+  const emailsBody = document.getElementById("emailsBody");
   const profilesBody = document.getElementById("profilesBody");
-  const companiesBody = document.getElementById("companiesBody");
   const resultCount = document.getElementById("resultCount");
   const filterInput = document.getElementById("filterInput");
   const errorSection = document.getElementById("errorSection");
@@ -29,28 +30,39 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentJobId = null;
   let pollInterval = null;
   let allLeads = [];
-  let currentSearchType = "profiles";
+  let currentSearchType = "emails";
 
-  // Live preview
+  // Update label & preview when mode changes
   function updatePreview() {
-    const n = nicheInput.value.trim() || "niche";
+    const kw = keywordsInput.value.trim();
     const p = placeInput.value.trim() || "place";
     const t = searchTypeSelect.value;
-    previewQuery.textContent = `LinkedIn ${t} for "${n}" in "${p}"`;
+
+    if (t === "emails") {
+      keywordsLabel.textContent = "Keywords (optional)";
+      keywordsInput.placeholder = "e.g. real estate, marketing";
+      const extra = kw ? ` for "${kw}"` : "";
+      previewQuery.textContent = `Instagram emails in "${p}"${extra}`;
+    } else {
+      keywordsLabel.textContent = "Niche / Industry";
+      keywordsInput.placeholder = "e.g. technology, marketing";
+      const extra = kw ? ` "${kw}"` : "";
+      previewQuery.textContent = `Instagram CEO/Director/Manager in "${p}"${extra}`;
+    }
   }
 
-  nicheInput.addEventListener("input", updatePreview);
+  keywordsInput.addEventListener("input", updatePreview);
   placeInput.addEventListener("input", updatePreview);
   searchTypeSelect.addEventListener("change", updatePreview);
 
   // Form submit
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const niche = nicheInput.value.trim();
+    const keywords = keywordsInput.value.trim();
     const place = placeInput.value.trim();
     const searchType = searchTypeSelect.value;
 
-    if (!niche || !place) return;
+    if (!place) return;
 
     currentSearchType = searchType;
     hideError();
@@ -59,10 +71,10 @@ document.addEventListener("DOMContentLoaded", () => {
     setFormEnabled(false);
 
     try {
-      const res = await fetch("/api/linkedin/scrape", {
+      const res = await fetch("/api/instagram/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ niche, place, search_type: searchType }),
+        body: JSON.stringify({ keywords, place, search_type: searchType }),
       });
 
       const data = await res.json();
@@ -81,7 +93,7 @@ document.addEventListener("DOMContentLoaded", () => {
   btnStop.addEventListener("click", async () => {
     if (!currentJobId) return;
     try {
-      await fetch(`/api/linkedin/stop/${currentJobId}`, { method: "POST" });
+      await fetch(`/api/instagram/stop/${currentJobId}`, { method: "POST" });
       stopPolling();
       progressTitle.textContent = "Stopped";
       progressSpinner.style.display = "none";
@@ -91,7 +103,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Download — fetch blob for reliable cross-browser download
+  // Download — fetch blob
   btnDownload.addEventListener("click", async () => {
     if (!currentJobId) return;
     try {
@@ -99,7 +111,7 @@ document.addEventListener("DOMContentLoaded", () => {
       btnDownload.innerHTML =
         '<span class="spinner-border spinner-border-sm me-1"></span>Preparing...';
 
-      const res = await fetch(`/api/linkedin/download/${currentJobId}`);
+      const res = await fetch(`/api/instagram/download/${currentJobId}`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || "Download failed.");
@@ -113,9 +125,9 @@ document.addEventListener("DOMContentLoaded", () => {
       const cd = res.headers.get("Content-Disposition");
       if (cd) {
         const match = cd.match(/filename=([^;]+)/);
-        a.download = match ? match[1].trim() : `linkedin_${currentJobId}.csv`;
+        a.download = match ? match[1].trim() : `instagram_${currentJobId}.csv`;
       } else {
-        a.download = `linkedin_${currentJobId}.csv`;
+        a.download = `instagram_${currentJobId}.csv`;
       }
 
       document.body.appendChild(a);
@@ -156,7 +168,7 @@ document.addEventListener("DOMContentLoaded", () => {
   async function pollStatus() {
     if (!currentJobId) return;
     try {
-      const res = await fetch(`/api/linkedin/status/${currentJobId}`);
+      const res = await fetch(`/api/instagram/status/${currentJobId}`);
       const data = await res.json();
 
       updateProgress(data.progress, data.message);
@@ -187,7 +199,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function loadResults() {
     try {
-      const res = await fetch(`/api/linkedin/results/${currentJobId}`);
+      const res = await fetch(`/api/instagram/results/${currentJobId}`);
       const data = await res.json();
       if (res.ok && data.leads) {
         allLeads = data.leads;
@@ -202,21 +214,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Render
   function renderLeads(leads) {
-    if (currentSearchType === "profiles") {
-      profilesTableCard.style.display = "";
-      companiesTableCard.style.display = "none";
-      renderProfiles(leads);
-    } else {
+    if (currentSearchType === "emails") {
+      emailsTableCard.style.display = "";
       profilesTableCard.style.display = "none";
-      companiesTableCard.style.display = "";
-      renderCompanies(leads);
+      renderEmails(leads);
+    } else {
+      emailsTableCard.style.display = "none";
+      profilesTableCard.style.display = "";
+      renderProfiles(leads);
     }
   }
 
-  function renderProfiles(leads) {
-    profilesBody.innerHTML = "";
+  function renderEmails(leads) {
+    emailsBody.innerHTML = "";
     if (leads.length === 0) {
-      profilesBody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">No results found.</td></tr>`;
+      emailsBody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No results found.</td></tr>`;
       return;
     }
     leads.forEach((l, idx) => {
@@ -224,47 +236,52 @@ document.addEventListener("DOMContentLoaded", () => {
         l.profile_url && l.profile_url !== "N/A"
           ? `<a href="${escapeUrl(l.profile_url)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>`
           : "N/A";
-      const username =
-        l.linkedin_username && l.linkedin_username !== "N/A"
-          ? `<span class="badge bg-info text-dark">${escapeHtml(l.linkedin_username)}</span>`
+      const emailHtml =
+        l.email && l.email !== "N/A"
+          ? `<a href="mailto:${escapeHtml(l.email.split(";")[0].trim())}">${escapeHtml(l.email)}</a>`
           : "N/A";
       const row = document.createElement("tr");
       row.innerHTML = `
         <td>${idx + 1}</td>
-        <td class="fw-semibold">${escapeHtml(l.name)}</td>
-        <td>${escapeHtml(l.title)}</td>
-        <td>${escapeHtml(l.company)}</td>
+        <td class="fw-semibold"><span class="badge bg-danger">@${escapeHtml(l.username)}</span></td>
+        <td>${escapeHtml(l.display_name)}</td>
+        <td>${emailHtml}</td>
         <td>${escapeHtml(l.location)}</td>
-        <td>${username}</td>
         <td>${profileLink}</td>
-        <td class="cell-truncate">${escapeHtml(l.snippet)}</td>
+        <td class="cell-truncate">${escapeHtml(l.bio_snippet)}</td>
       `;
-      profilesBody.appendChild(row);
+      emailsBody.appendChild(row);
     });
   }
 
-  function renderCompanies(leads) {
-    companiesBody.innerHTML = "";
+  function renderProfiles(leads) {
+    profilesBody.innerHTML = "";
     if (leads.length === 0) {
-      companiesBody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No results found.</td></tr>`;
+      profilesBody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No results found.</td></tr>`;
       return;
     }
     leads.forEach((l, idx) => {
-      const companyLink =
+      const profileLink =
+        l.profile_url && l.profile_url !== "N/A"
+          ? `<a href="${escapeUrl(l.profile_url)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>`
+          : "N/A";
+      const companyUrlHtml =
         l.company_url && l.company_url !== "N/A"
-          ? `<a href="${escapeUrl(l.company_url)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>`
+          ? `<a href="${escapeUrl(l.company_url)}" target="_blank" rel="noopener">${escapeHtml(truncate(l.company_url, 30))}</a>`
           : "N/A";
       const row = document.createElement("tr");
       row.innerHTML = `
         <td>${idx + 1}</td>
-        <td class="fw-semibold">${escapeHtml(l.company_name)}</td>
-        <td>${escapeHtml(l.industry)}</td>
-        <td>${escapeHtml(l.company_size)}</td>
+        <td class="fw-semibold"><span class="badge bg-danger">@${escapeHtml(l.username)}</span></td>
+        <td>${escapeHtml(l.display_name)}</td>
+        <td>${escapeHtml(l.title)}</td>
+        <td>${escapeHtml(l.company)}</td>
+        <td>${companyUrlHtml}</td>
         <td>${escapeHtml(l.location)}</td>
-        <td>${companyLink}</td>
-        <td class="cell-truncate">${escapeHtml(l.description)}</td>
+        <td>${profileLink}</td>
+        <td class="cell-truncate">${escapeHtml(l.bio_snippet)}</td>
       `;
-      companiesBody.appendChild(row);
+      profilesBody.appendChild(row);
     });
   }
 
@@ -288,8 +305,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function hideResults() {
     resultsSection.style.display = "none";
+    emailsBody.innerHTML = "";
     profilesBody.innerHTML = "";
-    companiesBody.innerHTML = "";
     allLeads = [];
     filterInput.value = "";
   }
@@ -304,7 +321,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   function setFormEnabled(enabled) {
-    nicheInput.disabled = !enabled;
+    keywordsInput.disabled = !enabled;
     placeInput.disabled = !enabled;
     searchTypeSelect.disabled = !enabled;
     btnScrape.disabled = !enabled;
@@ -332,5 +349,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (!url) return "#";
     if (!url.startsWith("http")) url = "https://" + url;
     return encodeURI(url);
+  }
+
+  function truncate(str, len) {
+    if (!str) return "";
+    return str.length > len ? str.substring(0, len) + "..." : str;
   }
 });

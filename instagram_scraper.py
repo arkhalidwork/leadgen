@@ -1,11 +1,18 @@
 """
-LinkedIn Lead Scraper Module
-Finds LinkedIn profiles and companies by niche & location using
-Google search (site:linkedin.com).  Direct LinkedIn scraping is
-rate-limited/blocked, so we route through Google SERPs with Selenium.
+Instagram Lead Scraper Module
+Scrapes Instagram profiles & emails via Google SERP
+(site:instagram.com) using Selenium.
 
-Supports multi-role executive search (CEO, Director, Manager, etc.)
-with anti-detection measures and multiple fallback parsing strategies.
+Two modes:
+  1. "emails"   – Find Instagram profiles that expose email addresses
+                   in a given location.
+                   Query pattern:
+                     site:instagram.com "<place>" "@gmail.com" "@hotmail.com"
+  2. "profiles" – Find executive / role-based profiles (CEO, Director,
+                   Manager…) and extract company & bio info from SERP
+                   snippets.
+                   Query pattern:
+                     site:instagram.com "CEO" "Chief Executive Officer" <place>
 """
 
 import re
@@ -18,10 +25,7 @@ from urllib.parse import quote_plus
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    TimeoutException,
     NoSuchElementException,
     WebDriverException,
 )
@@ -29,42 +33,67 @@ from selenium.common.exceptions import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Common free-mail domains to search for exposed emails
+EMAIL_DOMAINS = [
+    "@gmail.com",
+    "@hotmail.com",
+    "@yahoo.com",
+    "@outlook.com",
+    "@icloud.com",
+    "@live.com",
+    "@mail.com",
+]
+
+# Email regex
+EMAIL_RE = re.compile(
+    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}",
+    re.I,
+)
+
+# Blacklisted email domains (false positives)
+EMAIL_BLACKLIST = {
+    "example.com", "test.com", "email.com", "domain.com",
+    "yoursite.com", "company.com", "website.com", "sentry.io",
+    "wixpress.com", "w3.org", "schema.org", "googleapis.com",
+    "googleusercontent.com", "gstatic.com",
+}
+
 
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
 
 @dataclass
-class LinkedInProfile:
-    """Represents a LinkedIn profile lead."""
-    name: str = ""
-    title: str = ""
-    company: str = ""
-    location: str = ""
+class InstagramEmailLead:
+    """A lead found via email-mode scraping."""
+    username: str = ""
     profile_url: str = ""
-    linkedin_username: str = ""
-    snippet: str = ""
+    display_name: str = ""
+    email: str = ""
+    bio_snippet: str = ""
+    location: str = ""
 
 
 @dataclass
-class LinkedInCompany:
-    """Represents a LinkedIn company lead."""
-    company_name: str = ""
-    industry: str = ""
-    location: str = ""
-    description: str = ""
+class InstagramProfileLead:
+    """A lead found via profile / executive-mode scraping."""
+    username: str = ""
+    profile_url: str = ""
+    display_name: str = ""
+    title: str = ""
+    company: str = ""
     company_url: str = ""
-    company_size: str = ""
+    bio_snippet: str = ""
+    location: str = ""
 
 
 # ---------------------------------------------------------------------------
 # Scraper
 # ---------------------------------------------------------------------------
 
-class LinkedInScraper:
-    """Scrapes LinkedIn profiles and companies via Google search."""
+class InstagramScraper:
+    """Scrapes Instagram profiles & emails via Google search."""
 
-    # User-Agent rotation pool
     USER_AGENTS = [
         (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -88,7 +117,7 @@ class LinkedInScraper:
         ),
     ]
 
-    # Batched executive role groups for OR-combined queries
+    # Role groups for executive / profile search
     ROLE_GROUPS = [
         '"CEO" OR "Chief Executive Officer" OR "Founder" OR "Co-Founder"',
         '"Director" OR "Managing Director" OR "President"',
@@ -117,7 +146,7 @@ class LinkedInScraper:
     # ---- Browser helpers -----------------------------------------------
 
     def _init_driver(self):
-        """Initialize Chrome with anti-detection measures."""
+        """Initialize Chrome with anti-detection."""
         chrome_options = Options()
         if self.headless:
             chrome_options.add_argument("--headless=new")
@@ -127,8 +156,6 @@ class LinkedInScraper:
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--lang=en-US")
         chrome_options.add_argument("--log-level=3")
-
-        # Anti-detection arguments
         chrome_options.add_argument(
             "--disable-blink-features=AutomationControlled"
         )
@@ -137,14 +164,12 @@ class LinkedInScraper:
         )
         chrome_options.add_experimental_option("useAutomationExtension", False)
 
-        # Randomised User-Agent
         ua = random.choice(self.USER_AGENTS)
         chrome_options.add_argument(f"--user-agent={ua}")
 
         self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.implicitly_wait(2)
 
-        # Remove navigator.webdriver flag so detection scripts see undefined
         try:
             self.driver.execute_cdp_cmd(
                 "Page.addScriptToEvaluateOnNewDocument",
@@ -160,7 +185,7 @@ class LinkedInScraper:
                 },
             )
         except Exception:
-            pass  # CDP not always available
+            pass
 
     def _close_driver(self):
         if self.driver:
@@ -170,10 +195,9 @@ class LinkedInScraper:
                 pass
             self.driver = None
 
-    # ---- Consent / CAPTCHA handling ------------------------------------
+    # ---- Consent / CAPTCHA ---------------------------------------------
 
     def _handle_consent(self):
-        """Click through Google consent / cookie dialogs."""
         selectors = [
             "//button[contains(., 'Accept all')]",
             "//button[contains(., 'Accept')]",
@@ -194,7 +218,6 @@ class LinkedInScraper:
         return False
 
     def _check_captcha(self) -> bool:
-        """Return True if Google is showing a CAPTCHA page."""
         try:
             src = self.driver.page_source.lower()
             return any(
@@ -211,8 +234,8 @@ class LinkedInScraper:
 
     def _google_search(self, query: str, num_pages: int = 3) -> list[dict]:
         """
-        Run a Google search and collect results using multiple fallback
-        strategies.  Returns list of dicts: {url, title, snippet}.
+        Run a Google search and return results: [{url, title, snippet}].
+        Uses 3 fallback strategies (same as LinkedIn scraper).
         """
         results: list[dict] = []
 
@@ -230,54 +253,54 @@ class LinkedInScraper:
                 self.driver.get(search_url)
                 time.sleep(3.0 + random.uniform(1.0, 3.0))
 
-                # Consent dialog (first page only)
                 if page == 0:
                     self._handle_consent()
                     time.sleep(1)
 
-                # CAPTCHA detection — back off and retry once
                 if self._check_captcha():
                     logger.warning("CAPTCHA detected — backing off…")
-                    time.sleep(10 + random.uniform(5, 10))
-                    self.driver.get(search_url)
-                    time.sleep(5)
-                    if self._check_captcha():
-                        logger.error("Still blocked by CAPTCHA. Stopping.")
+                    for attempt in range(3):
+                        wait = (15 + attempt * 15) + random.uniform(5, 15)
+                        logger.info(f"CAPTCHA retry {attempt + 1}/3, waiting {wait:.0f}s")
+                        time.sleep(wait)
+                        self.driver.get(search_url)
+                        time.sleep(5)
+                        if not self._check_captcha():
+                            break
+                    else:
+                        logger.error("Still blocked by CAPTCHA after retries.")
                         break
 
-                # ---- Strategy 1: div.g containers ----
+                # Strategy 1: div.g containers
                 page_results = self._parse_serp_divg()
 
-                # ---- Strategy 2: broader selectors ----
+                # Strategy 2: broad <a> selector
                 if not page_results:
                     page_results = self._parse_serp_broad()
 
-                # ---- Strategy 3: regex on page source ----
+                # Strategy 3: regex fallback
                 if not page_results:
                     page_results = self._parse_serp_regex()
 
                 results.extend(page_results)
 
-                # Check if there is a "Next" page button
                 try:
                     self.driver.find_element(By.ID, "pnnext")
                 except NoSuchElementException:
-                    break  # no more pages
+                    break
 
             except WebDriverException as e:
                 logger.error(f"Error on SERP page {page}: {e}")
                 continue
 
-            # Random delay between pages
             if page < num_pages - 1:
                 time.sleep(random.uniform(2.0, 5.0))
 
         return results
 
-    # ---- SERP parsing strategies ----------------------------------------
+    # ---- SERP Parsing Strategies ----------------------------------------
 
     def _parse_serp_divg(self) -> list[dict]:
-        """Strategy 1 — standard div.g result containers."""
         results = []
         try:
             divs = self.driver.find_elements(By.CSS_SELECTOR, "div.g")
@@ -285,7 +308,7 @@ class LinkedInScraper:
                 try:
                     a_tag = div.find_element(By.CSS_SELECTOR, "a[href]")
                     href = a_tag.get_attribute("href") or ""
-                    if "linkedin.com" not in href:
+                    if "instagram.com" not in href:
                         continue
 
                     title = ""
@@ -299,18 +322,29 @@ class LinkedInScraper:
                     try:
                         snippet_el = div.find_element(
                             By.CSS_SELECTOR,
-                            "div[data-sncf], span.aCOpRe, div.VwiC3b, "
-                            "div[style*='-webkit-line-clamp']",
+                            "div.VwiC3b, div[data-sncf], "
+                            "div[style*='-webkit-line-clamp'], "
+                            "span[class*='st'], div.IsZvec, "
+                            "div[data-content-feature]",
                         )
                         snippet = snippet_el.text.strip()
                     except NoSuchElementException:
-                        # broader fallback
+                        # Fallback: grab entire div text minus title
+                        try:
+                            full = div.text.strip()
+                            if title and title in full:
+                                snippet = full.replace(title, "", 1).strip()
+                            elif len(full) > 30:
+                                snippet = full[:300]
+                        except Exception:
+                            pass
+                    if not snippet:
                         try:
                             for span in div.find_elements(
                                 By.CSS_SELECTOR, "span"
                             ):
                                 t = span.text.strip()
-                                if len(t) > 40:
+                                if len(t) > 30:
                                     snippet = t
                                     break
                         except Exception:
@@ -326,22 +360,25 @@ class LinkedInScraper:
         return results
 
     def _parse_serp_broad(self) -> list[dict]:
-        """Strategy 2 — look for any <a> pointing to linkedin.com."""
         results = []
         try:
             links = self.driver.find_elements(
-                By.CSS_SELECTOR, "a[href*='linkedin.com']"
+                By.CSS_SELECTOR, "a[href*='instagram.com']"
             )
             for a_tag in links:
                 href = a_tag.get_attribute("href") or ""
-                if (
-                    "linkedin.com/in/" not in href
-                    and "linkedin.com/company/" not in href
-                ):
+                if "instagram.com/" not in href:
                     continue
-                # Skip Google-internal redirect links
-                if "google.com" in href and "linkedin.com" not in href.split("?")[0]:
-                    continue
+                # Skip internal Google links (but keep Google redirect URLs)
+                if "google.com" in href:
+                    if "instagram.com" not in href:
+                        continue
+                    # Extract actual destination from Google redirect
+                    redir_m = re.search(r'[?&]q=(https?[^&]+)', href)
+                    if redir_m:
+                        href = redir_m.group(1)
+                    elif "instagram.com" not in href.split("?")[0]:
+                        continue
 
                 title = a_tag.text.strip()[:150] or ""
                 snippet = ""
@@ -362,161 +399,213 @@ class LinkedInScraper:
         return results
 
     def _parse_serp_regex(self) -> list[dict]:
-        """Strategy 3 — regex on page source for LinkedIn URLs."""
         results = []
         try:
             source = self.driver.page_source
             urls = set(
                 re.findall(
-                    r'https?://(?:www\.)?linkedin\.com/(?:in|company)/[\w\-]+',
+                    r'https?://(?:www\.)?instagram\.com/[\w.\-]+',
                     source,
                 )
             )
             for url in urls:
                 clean = url.split("?")[0].split("&amp;")[0]
+                # Skip generic IG pages
+                if clean.rstrip("/") in (
+                    "https://www.instagram.com",
+                    "https://instagram.com",
+                ):
+                    continue
                 results.append({"url": clean, "title": "", "snippet": ""})
         except Exception as e:
             logger.debug(f"Strategy-3 error: {e}")
         return results
 
-    # ---- Profile parsing -----------------------------------------------
+    # ---- Helpers: extract username from IG URL -------------------------
 
-    def _parse_profile_from_serp(
-        self, result: dict
-    ) -> LinkedInProfile | None:
-        """Parse a profile from a Google SERP result."""
-        url = result["url"]
-        title = result["title"]
-        snippet = result["snippet"]
-
-        if "linkedin.com/in/" not in url:
-            return None
-
-        profile = LinkedInProfile()
-        profile.profile_url = url.split("?")[0]
-        profile.snippet = snippet
-
-        # Extract LinkedIn username from URL
-        m = re.search(r'linkedin\.com/in/([\w\-]+)', url)
+    @staticmethod
+    def _extract_username(url: str) -> str:
+        """Return the IG username from a URL, or empty string."""
+        m = re.search(
+            r'instagram\.com/([\w][\w.\-]{0,29})',
+            url,
+        )
         if m:
-            profile.linkedin_username = m.group(1)
+            username = m.group(1).rstrip(".")
+            # Skip non-profile pages
+            if username.lower() in (
+                "p", "explore", "reel", "reels", "stories",
+                "tv", "accounts", "about", "legal", "developer",
+                "directory", "terms", "privacy", "s", "static",
+                "accounts", "nametag", "direct", "lite",
+            ):
+                return ""
+            return username
+        return ""
 
-        # Parse name / title / company from Google result title
-        # Typical format: "Name - Title - Company | LinkedIn"
-        if title:
-            title_clean = re.sub(
-                r'\s*[\|–—]\s*LinkedIn.*$', '', title
-            ).strip()
-            parts = [
-                p.strip() for p in title_clean.split(" - ") if p.strip()
-            ]
-            if parts:
-                profile.name = parts[0]
-            if len(parts) > 1:
-                profile.title = parts[1]
-            if len(parts) > 2:
-                profile.company = parts[2]
+    # ---- Helpers: validate email ----------------------------------------
 
-        # Snippet-based extraction
-        if snippet:
-            # Location
-            loc_match = re.search(
-                r'(?:located?\s+in|based\s+in|from|📍)'
-                r'\s+([A-Z][^.·\-\n]+)',
-                snippet,
-                re.I,
-            )
-            if loc_match:
-                profile.location = loc_match.group(1).strip()[:80]
+    @staticmethod
+    def _is_valid_email(email: str) -> bool:
+        if not email or "@" not in email:
+            return False
+        domain = email.split("@")[1].lower()
+        if domain in EMAIL_BLACKLIST:
+            return False
+        if domain.endswith(
+            (".png", ".jpg", ".gif", ".svg", ".webp", ".js", ".css")
+        ):
+            return False
+        return True
 
-            # Title fallback
-            if not profile.title:
-                first_line = snippet.split("·")[0].split("…")[0].strip()
-                if first_line and len(first_line) < 120:
-                    profile.title = first_line
+    # ---- Email-mode parsing --------------------------------------------
 
-            # Company fallback — "at <Company>"
-            if not profile.company:
-                comp_match = re.search(
-                    r'(?:\bat\b|@)\s+([A-Z][^.·\-\n,]{2,60})',
-                    snippet,
-                    re.I,
-                )
-                if comp_match:
-                    profile.company = comp_match.group(1).strip()
-
-        # Last-resort: derive name from username
-        if not profile.name and profile.linkedin_username:
-            name = profile.linkedin_username.replace("-", " ").title()
-            if len(name.split()) >= 2:
-                profile.name = name
-
-        return profile if profile.name else None
-
-    # ---- Company parsing -----------------------------------------------
-
-    def _parse_company_from_serp(
-        self, result: dict
-    ) -> LinkedInCompany | None:
-        """Parse a company from a Google SERP result."""
+    def _parse_email_lead(self, result: dict, place: str) -> InstagramEmailLead | None:
+        """Parse an email-bearing lead from a SERP result."""
         url = result["url"]
         title = result["title"]
         snippet = result["snippet"]
 
-        if "linkedin.com/company/" not in url:
+        if "instagram.com" not in url:
             return None
 
-        company = LinkedInCompany()
-        company.company_url = url.split("?")[0]
+        username = self._extract_username(url)
+        if not username:
+            return None
 
+        lead = InstagramEmailLead()
+        lead.username = username
+        lead.profile_url = f"https://www.instagram.com/{username}/"
+        lead.location = place
+
+        # Display name from title: "Name (@user) • Instagram ..."
         if title:
-            title_clean = re.sub(
-                r'\s*[\|–—]\s*LinkedIn.*$', '', title
-            ).strip()
-            company.company_name = title_clean
+            name_match = re.match(r'^([^(@]+)', title)
+            if name_match:
+                lead.display_name = name_match.group(1).strip()
 
+        # Combine title + snippet for email extraction
+        combined_text = f"{title} {snippet}"
+
+        # Extract emails
+        emails = set()
+        for match in EMAIL_RE.findall(combined_text):
+            if self._is_valid_email(match):
+                emails.add(match.lower())
+
+        if emails:
+            lead.email = "; ".join(sorted(emails))
+        else:
+            lead.email = ""  # No email in snippet — keep lead anyway
+
+        # Bio snippet
         if snippet:
-            company.description = snippet[:200]
+            lead.bio_snippet = snippet[:200]
 
-            ind_match = re.search(
-                r'(?:industry|sector)[:\s]+([^.·\n]+)', snippet, re.I,
-            )
-            if ind_match:
-                company.industry = ind_match.group(1).strip()[:80]
+        return lead
 
-            size_match = re.search(
-                r'(\d[\d,]*\+?\s*(?:employees|workers|people|staff))',
-                snippet,
-                re.I,
-            )
-            if size_match:
-                company.company_size = size_match.group(1).strip()
+    # ---- Profile-mode parsing -------------------------------------------
 
-            loc_match = re.search(
-                r'(?:headquartered?\s+in|based\s+in|located?\s+in|,\s*)'
-                r'([A-Z][A-Za-z\s,]+(?:Area)?)',
-                snippet,
-                re.I,
-            )
-            if loc_match:
-                company.location = loc_match.group(1).strip()[:80]
+    def _parse_profile_lead(self, result: dict, place: str) -> InstagramProfileLead | None:
+        """Parse a role/executive profile from a SERP result."""
+        url = result["url"]
+        title = result["title"]
+        snippet = result["snippet"]
 
-        return company if company.company_name else None
+        if "instagram.com" not in url:
+            return None
 
-    # ---- Query builders ------------------------------------------------
+        username = self._extract_username(url)
+        if not username:
+            return None
 
-    def _build_executive_queries(
-        self, niche: str, place: str
-    ) -> list[str]:
+        lead = InstagramProfileLead()
+        lead.username = username
+        lead.profile_url = f"https://www.instagram.com/{username}/"
+        lead.location = place
+
+        # Display name from title
+        if title:
+            name_match = re.match(r'^([^(@]+)', title)
+            if name_match:
+                lead.display_name = name_match.group(1).strip()
+
+        combined = f"{title} {snippet}"
+
+        # Try to extract title/role
+        role_patterns = [
+            r'(CEO|Chief Executive Officer|Founder|Co-Founder)',
+            r'(Director|Managing Director|President)',
+            r'(Manager|General Manager|Senior Manager)',
+            r'(VP|Vice President|COO|CFO|CTO)',
+            r'(Head of\s+\w+)',
+            r'(Partner|Owner)',
+        ]
+        for pat in role_patterns:
+            m = re.search(pat, combined, re.I)
+            if m:
+                lead.title = m.group(1).strip()
+                break
+
+        # Company name: look for patterns like "at <Company>", "@ <Company>",
+        # or lines starting with uppercase after role
+        comp_patterns = [
+            r'(?:\bat\b|@)\s+([A-Z][^.·\-\n,@]{2,60})',
+            r'(?:company|org|organisation|organization)[:\s]+([^.·\n,]{2,60})',
+        ]
+        for pat in comp_patterns:
+            m = re.search(pat, combined, re.I)
+            if m:
+                lead.company = m.group(1).strip()
+                break
+
+        # Try to find a URL in snippet (website / company URL in bio)
+        url_match = re.search(
+            r'(https?://[^\s"\'<>,]+)',
+            snippet or "",
+        )
+        if url_match:
+            found_url = url_match.group(1).rstrip(".")
+            # Only keep if not an instagram URL
+            if "instagram.com" not in found_url:
+                lead.company_url = found_url
+
+        # Bio snippet
+        if snippet:
+            lead.bio_snippet = snippet[:200]
+
+        return lead
+
+    # ---- Query builders -------------------------------------------------
+
+    def _build_email_queries(self, place: str, keywords: str) -> list[str]:
         """
-        Build multiple Google queries — one per executive-role group —
-        so we cast a wide net for CEOs, Directors, Managers, etc.
+        Build email-mode queries:
+          site:instagram.com "<place>" ("@gmail.com" OR "@hotmail.com" OR ...)
+        We split email domains into groups of 3 and join with OR.
+        """
+        queries = []
+        # Chunk email domains into groups of 3 joined with OR
+        for i in range(0, len(EMAIL_DOMAINS), 3):
+            chunk = EMAIL_DOMAINS[i:i + 3]
+            domain_part = " OR ".join(f'"{d}"' for d in chunk)
+            q = f'site:instagram.com "{place}" ({domain_part})'
+            if keywords:
+                q += f' "{keywords}"'
+            queries.append(q)
+        return queries
+
+    def _build_profile_queries(self, keywords: str, place: str) -> list[str]:
+        """
+        Build profile-mode queries using role groups:
+          site:instagram.com ("CEO" OR "Founder") "<place>"
+        Parentheses ensure the site: restriction applies to all OR branches.
         """
         queries = []
         for role_group in self.ROLE_GROUPS:
-            q = f'site:linkedin.com/in/ {role_group} "{place}"'
-            if niche:
-                q += f' "{niche}"'
+            q = f'site:instagram.com ({role_group}) "{place}"'
+            if keywords:
+                q += f' "{keywords}"'
             queries.append(q)
         return queries
 
@@ -524,26 +613,22 @@ class LinkedInScraper:
 
     def scrape(
         self,
-        niche: str,
+        keywords: str,
         place: str,
-        search_type: str = "profiles",
+        search_type: str = "emails",
         max_pages: int = 3,
     ) -> list[dict]:
         """
-        Main scraping method.
-
-        For **profiles** mode the scraper automatically searches for
-        multiple executive roles (CEO, Director, Manager, VP, …)
-        combined with the given niche/industry and place.
+        Main scraping entry point.
 
         Args:
-            niche: Industry or keyword (e.g., "technology", "marketing")
-            place: City / location (e.g., "Lahore", "New York")
-            search_type: "profiles" or "companies"
-            max_pages: Google result pages per query (10 results each)
+            keywords: Optional niche / industry keyword
+            place: Location / city to search in
+            search_type: "emails" or "profiles"
+            max_pages: Google result pages per query
 
         Returns:
-            List of dicts (profile or company data)
+            List of dicts (email leads or profile leads)
         """
         self._should_stop = False
         leads: list[dict] = []
@@ -552,13 +637,11 @@ class LinkedInScraper:
             self._report_progress("Initializing browser...", 2)
             self._init_driver()
 
-            # ---- Build queries ----
-            if search_type == "profiles":
-                queries = self._build_executive_queries(niche, place)
+            # Build query set
+            if search_type == "emails":
+                queries = self._build_email_queries(place, keywords)
             else:
-                queries = [
-                    f'site:linkedin.com/company/ "{niche}" "{place}"'
-                ]
+                queries = self._build_profile_queries(keywords, place)
 
             total_queries = len(queries)
             all_results: list[dict] = []
@@ -576,7 +659,6 @@ class LinkedInScraper:
                 results = self._google_search(query, num_pages=max_pages)
                 all_results.extend(results)
 
-                # Pause between different queries to look human
                 if qi < total_queries - 1 and not self._should_stop:
                     time.sleep(random.uniform(4, 8))
 
@@ -591,20 +673,22 @@ class LinkedInScraper:
                 f"Found {total} search results. Parsing…", 60,
             )
 
-            seen_urls: set[str] = set()
+            seen_usernames: set[str] = set()
+
             for idx, result in enumerate(all_results):
                 if self._should_stop:
                     break
 
-                url_clean = result["url"].split("?")[0]
-                if url_clean in seen_urls:
+                # Deduplicate by username
+                username = self._extract_username(result["url"])
+                if not username or username in seen_usernames:
                     continue
-                seen_urls.add(url_clean)
+                seen_usernames.add(username)
 
-                if search_type == "profiles":
-                    parsed = self._parse_profile_from_serp(result)
+                if search_type == "emails":
+                    parsed = self._parse_email_lead(result, place)
                 else:
-                    parsed = self._parse_company_from_serp(result)
+                    parsed = self._parse_profile_lead(result, place)
 
                 if parsed:
                     leads.append(asdict(parsed))
@@ -617,11 +701,11 @@ class LinkedInScraper:
                     )
 
             self._report_progress(
-                f"Done! Found {len(leads)} {search_type}.", 100,
+                f"Done! Found {len(leads)} Instagram {search_type}.", 100,
             )
 
         except Exception as e:
-            logger.error(f"LinkedIn scraping failed: {e}")
+            logger.error(f"Instagram scraping failed: {e}")
             self._report_progress(f"Error: {str(e)}", -1)
             raise
         finally:
@@ -634,50 +718,38 @@ class LinkedInScraper:
 # Post-processing
 # ---------------------------------------------------------------------------
 
-def clean_linkedin_leads(
-    leads: list[dict], search_type: str = "profiles",
+def clean_instagram_leads(
+    leads: list[dict], search_type: str = "emails",
 ) -> list[dict]:
-    """Clean and deduplicate LinkedIn leads."""
+    """Clean and deduplicate Instagram leads."""
     cleaned: list[dict] = []
     seen: set[str] = set()
 
     for lead in leads:
-        if search_type == "profiles":
-            key = lead.get("profile_url", "")
-            name = lead.get("name", "").strip()
-            if not name or key in seen:
-                continue
-            seen.add(key)
+        username = lead.get("username", "").strip()
+        if not username or username in seen:
+            continue
+        seen.add(username)
 
-            # Derive username if missing
-            username = lead.get("linkedin_username", "")
-            if not username and key:
-                m = re.search(r'linkedin\.com/in/([\w\-]+)', key)
-                if m:
-                    username = m.group(1)
-
+        if search_type == "emails":
             cleaned.append({
-                "name": name,
-                "title": lead.get("title", "N/A") or "N/A",
-                "company": lead.get("company", "N/A") or "N/A",
+                "username": username,
+                "profile_url": lead.get("profile_url", "N/A") or "N/A",
+                "display_name": lead.get("display_name", "N/A") or "N/A",
+                "email": lead.get("email", "N/A") or "N/A",
+                "bio_snippet": lead.get("bio_snippet", "N/A") or "N/A",
                 "location": lead.get("location", "N/A") or "N/A",
-                "profile_url": key or "N/A",
-                "linkedin_username": username or "N/A",
-                "snippet": lead.get("snippet", "N/A") or "N/A",
             })
         else:
-            key = lead.get("company_url", "")
-            name = lead.get("company_name", "").strip()
-            if not name or key in seen:
-                continue
-            seen.add(key)
             cleaned.append({
-                "company_name": name,
-                "industry": lead.get("industry", "N/A") or "N/A",
+                "username": username,
+                "profile_url": lead.get("profile_url", "N/A") or "N/A",
+                "display_name": lead.get("display_name", "N/A") or "N/A",
+                "title": lead.get("title", "N/A") or "N/A",
+                "company": lead.get("company", "N/A") or "N/A",
+                "company_url": lead.get("company_url", "N/A") or "N/A",
+                "bio_snippet": lead.get("bio_snippet", "N/A") or "N/A",
                 "location": lead.get("location", "N/A") or "N/A",
-                "description": lead.get("description", "N/A") or "N/A",
-                "company_url": key or "N/A",
-                "company_size": lead.get("company_size", "N/A") or "N/A",
             })
 
     return cleaned

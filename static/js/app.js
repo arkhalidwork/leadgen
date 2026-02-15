@@ -88,10 +88,45 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Download button
-  btnDownload.addEventListener("click", () => {
+  // Download button — fetch blob for reliable cross-browser download
+  btnDownload.addEventListener("click", async () => {
     if (!currentJobId) return;
-    window.location.href = `/api/download/${currentJobId}`;
+    try {
+      btnDownload.disabled = true;
+      btnDownload.innerHTML =
+        '<span class="spinner-border spinner-border-sm me-1"></span>Preparing...';
+
+      const res = await fetch(`/api/download/${currentJobId}`);
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || "Download failed.");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+
+      // Try to extract filename from Content-Disposition header
+      const cd = res.headers.get("Content-Disposition");
+      if (cd) {
+        const match = cd.match(/filename=([^;]+)/);
+        a.download = match ? match[1].trim() : `leads_${currentJobId}.csv`;
+      } else {
+        a.download = `leads_${currentJobId}.csv`;
+      }
+
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Download failed:", err);
+      showError("Download failed: " + err.message);
+    } finally {
+      btnDownload.disabled = false;
+      btnDownload.innerHTML = '<i class="bi bi-download me-1"></i>Download CSV';
+    }
   });
 
   // Filter results

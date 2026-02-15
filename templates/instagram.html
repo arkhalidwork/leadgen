@@ -1,32 +1,47 @@
-{% extends "base.html" %} {% block title %}LeadGen — LinkedIn Scraper{% endblock
-%} {% block content %}
+{% extends "base.html" %} {% block title %}LeadGen — Instagram Scraper{%
+endblock %} {% block content %}
 <!-- Search Form Card -->
 <div class="row justify-content-center mb-5">
   <div class="col-lg-8">
     <div class="card shadow-lg border-0">
       <div class="card-body p-4 p-md-5">
         <h2 class="card-title text-center mb-2">
-          <i class="bi bi-linkedin text-primary me-2"></i>LinkedIn Scraper
+          <i class="bi bi-instagram text-danger me-2"></i>Instagram Scraper
         </h2>
         <p class="text-center text-muted mb-4">
-          Find LinkedIn profiles and companies by niche &amp; location
+          Find Instagram profiles with emails or scrape executive profiles by
+          role &amp; location
         </p>
 
-        <form id="linkedinForm">
+        <form id="instagramForm">
           <div class="row g-3">
+            <!-- Search Type -->
+            <div class="col-md-3">
+              <label for="searchType" class="form-label fw-semibold">
+                <i class="bi bi-search me-1"></i>Mode
+              </label>
+              <select class="form-select form-select-lg" id="searchType">
+                <option value="emails" selected>Scrape Emails</option>
+                <option value="profiles">Scrape Profiles</option>
+              </select>
+            </div>
+
+            <!-- Keywords (optional for emails, niche for profiles) -->
             <div class="col-md-4">
-              <label for="niche" class="form-label fw-semibold">
-                <i class="bi bi-briefcase me-1"></i>Niche / Role
+              <label for="keywords" class="form-label fw-semibold">
+                <i class="bi bi-tag me-1"></i
+                ><span id="keywordsLabel">Keywords (optional)</span>
               </label>
               <input
                 type="text"
                 class="form-control form-control-lg"
-                id="niche"
-                placeholder="e.g. marketing manager, dentist"
-                required
+                id="keywords"
+                placeholder="e.g. real estate, marketing"
               />
             </div>
-            <div class="col-md-4">
+
+            <!-- Place -->
+            <div class="col-md-3">
               <label for="place" class="form-label fw-semibold">
                 <i class="bi bi-pin-map me-1"></i>Location
               </label>
@@ -34,23 +49,16 @@
                 type="text"
                 class="form-control form-control-lg"
                 id="place"
-                placeholder="e.g. New York, London"
+                placeholder="e.g. Dubai, London"
                 required
               />
             </div>
-            <div class="col-md-2">
-              <label for="searchType" class="form-label fw-semibold">
-                <i class="bi bi-search me-1"></i>Type
-              </label>
-              <select class="form-select form-select-lg" id="searchType">
-                <option value="profiles" selected>Profiles</option>
-                <option value="companies">Companies</option>
-              </select>
-            </div>
+
+            <!-- Go button -->
             <div class="col-md-2 d-flex align-items-end">
               <button
                 type="submit"
-                class="btn btn-primary btn-lg w-100"
+                class="btn btn-danger btn-lg w-100"
                 id="btnScrape"
               >
                 <i class="bi bi-rocket-takeoff me-1"></i>Go
@@ -63,7 +71,7 @@
           <small class="text-muted">
             Searching:
             <span id="previewQuery" class="fst-italic"
-              >LinkedIn profiles for "niche" in "place"</span
+              >Instagram emails in "place"</span
             >
           </small>
         </div>
@@ -84,7 +92,7 @@
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0">
             <span
-              class="spinner-border spinner-border-sm text-primary me-2"
+              class="spinner-border spinner-border-sm text-danger me-2"
               id="progressSpinner"
             ></span>
             <span id="progressTitle">Scraping in progress...</span>
@@ -99,7 +107,7 @@
         </div>
         <div class="progress mb-2" style="height: 8px">
           <div
-            class="progress-bar progress-bar-striped progress-bar-animated"
+            class="progress-bar progress-bar-striped progress-bar-animated bg-danger"
             id="progressBar"
             role="progressbar"
             style="width: 0%"
@@ -123,7 +131,7 @@
     >
       <h4 class="mb-0">
         <i class="bi bi-table me-2"></i>Results
-        <span class="badge bg-primary ms-2" id="resultCount">0</span>
+        <span class="badge bg-danger ms-2" id="resultCount">0</span>
       </h4>
       <div class="d-flex gap-2">
         <input
@@ -139,31 +147,30 @@
       </div>
     </div>
 
-    <!-- Profiles Table -->
-    <div class="card border-0 shadow" id="profilesTableCard">
+    <!-- Emails Table -->
+    <div class="card border-0 shadow" id="emailsTableCard">
       <div class="table-responsive">
         <table class="table table-hover mb-0">
           <thead class="table-dark">
             <tr>
               <th>#</th>
-              <th>Name</th>
-              <th>Title / Role</th>
-              <th>Company</th>
+              <th>Username</th>
+              <th>Display Name</th>
+              <th>Email</th>
               <th>Location</th>
-              <th>LinkedIn Username</th>
               <th>Profile</th>
-              <th>Snippet</th>
+              <th>Bio</th>
             </tr>
           </thead>
-          <tbody id="profilesBody"></tbody>
+          <tbody id="emailsBody"></tbody>
         </table>
       </div>
     </div>
 
-    <!-- Companies Table -->
+    <!-- Profiles Table -->
     <div
       class="card border-0 shadow"
-      id="companiesTableCard"
+      id="profilesTableCard"
       style="display: none"
     >
       <div class="table-responsive">
@@ -171,15 +178,17 @@
           <thead class="table-dark">
             <tr>
               <th>#</th>
+              <th>Username</th>
+              <th>Display Name</th>
+              <th>Title / Role</th>
               <th>Company</th>
-              <th>Industry</th>
-              <th>Size</th>
+              <th>Company URL</th>
               <th>Location</th>
-              <th>Company Page</th>
-              <th>Description</th>
+              <th>Profile</th>
+              <th>Bio</th>
             </tr>
           </thead>
-          <tbody id="companiesBody"></tbody>
+          <tbody id="profilesBody"></tbody>
         </table>
       </div>
     </div>
@@ -196,5 +205,5 @@
   </div>
 </div>
 {% endblock %} {% block extra_js %}
-<script src="{{ url_for('static', filename='js/linkedin.js') }}"></script>
+<script src="{{ url_for('static', filename='js/instagram.js') }}"></script>
 {% endblock %}
