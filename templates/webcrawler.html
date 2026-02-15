@@ -1,49 +1,55 @@
-{% extends "base.html" %} {% block title %}LeadGen — Google Maps Scraper{%
-endblock %} {% block content %}
+{% extends "base.html" %} {% block title %}LeadGen — Web Crawler{% endblock %}
+{% block content %}
 <!-- Search Form Card -->
 <div class="row justify-content-center mb-5">
   <div class="col-lg-8">
     <div class="card shadow-lg border-0">
       <div class="card-body p-4 p-md-5">
         <h2 class="card-title text-center mb-2">
-          <i class="bi bi-geo-alt-fill text-primary me-2"></i>Google Maps Lead
-          Generator
+          <i class="bi bi-globe2 me-2" style="color: #ff6b35"></i>Multi-Source
+          Web Crawler
         </h2>
         <p class="text-center text-muted mb-4">
-          Search Google Maps for businesses and export their contact info as CSV
+          Crawl Google, Bing &amp; websites to build massive lead databases with
+          emails, phones &amp; socials
         </p>
 
-        <form id="scrapeForm">
+        <form id="crawlerForm">
           <div class="row g-3">
             <div class="col-md-5">
               <label for="keyword" class="form-label fw-semibold">
-                <i class="bi bi-tag me-1"></i>Business Type / Keyword
+                <i class="bi bi-tag me-1"></i>Keyword / Niche
               </label>
               <input
                 type="text"
                 class="form-control form-control-lg"
                 id="keyword"
-                placeholder="e.g. restaurants, dentists, plumbers"
+                placeholder="e.g. real estate, printing, plumbers"
                 required
               />
             </div>
             <div class="col-md-5">
               <label for="place" class="form-label fw-semibold">
-                <i class="bi bi-pin-map me-1"></i>Location / Place
+                <i class="bi bi-pin-map me-1"></i>Location
               </label>
               <input
                 type="text"
                 class="form-control form-control-lg"
                 id="place"
-                placeholder="e.g. New York, London, Mumbai"
+                placeholder="e.g. Dubai, London, New York"
                 required
               />
             </div>
             <div class="col-md-2 d-flex align-items-end">
               <button
                 type="submit"
-                class="btn btn-primary btn-lg w-100"
+                class="btn btn-lg w-100"
                 id="btnScrape"
+                style="
+                  background: linear-gradient(135deg, #ff6b35, #f7c948);
+                  color: #000;
+                  font-weight: 600;
+                "
               >
                 <i class="bi bi-rocket-takeoff me-1"></i>Go
               </button>
@@ -53,9 +59,9 @@ endblock %} {% block content %}
 
         <div class="text-center mt-3">
           <small class="text-muted">
-            Search query: "<span id="previewQuery" class="fst-italic"
+            Crawling: "<span id="previewQuery" class="fst-italic"
               >keyword in place</span
-            >"
+            >" across multiple sources
           </small>
         </div>
       </div>
@@ -75,59 +81,32 @@ endblock %} {% block content %}
         <div class="d-flex justify-content-between align-items-center mb-2">
           <h5 class="mb-0">
             <span
-              class="spinner-border spinner-border-sm text-primary me-2"
+              class="spinner-border spinner-border-sm me-2"
               id="progressSpinner"
+              style="color: #ff6b35"
             ></span>
-            <span id="progressTitle">Scraping in progress...</span>
+            <span id="progressTitle">Crawling in progress...</span>
           </h5>
-          <div class="d-flex align-items-center gap-3">
-            <span
-              class="badge bg-dark px-3 py-2"
-              id="elapsedTimer"
-              style="font-family: monospace; font-size: 0.95rem"
-            >
-              <i class="bi bi-clock me-1"></i>00:00:00
-            </span>
-            <button
-              class="btn btn-outline-danger btn-sm"
-              id="btnStop"
-              title="Stop Scraping"
-            >
-              <i class="bi bi-stop-circle me-1"></i>Stop
-            </button>
-          </div>
+          <button
+            class="btn btn-outline-danger btn-sm"
+            id="btnStop"
+            title="Stop Crawling"
+          >
+            <i class="bi bi-stop-circle me-1"></i>Stop
+          </button>
         </div>
         <div class="progress mb-2" style="height: 8px">
           <div
             class="progress-bar progress-bar-striped progress-bar-animated"
             id="progressBar"
             role="progressbar"
-            style="width: 0%"
+            style="
+              width: 0%;
+              background: linear-gradient(90deg, #ff6b35, #f7c948);
+            "
           ></div>
         </div>
         <small class="text-muted" id="progressMessage">Starting...</small>
-
-        <!-- Live Stats Row -->
-        <div class="row g-2 mt-3" id="liveStats" style="display: none">
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold text-primary" id="statAreas">0 / 0</div>
-              <small class="text-muted">Areas Covered</small>
-            </div>
-          </div>
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold text-success" id="statLeads">0</div>
-              <small class="text-muted">Leads Found</small>
-            </div>
-          </div>
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold text-info" id="statWebsites">—</div>
-              <small class="text-muted">Websites Scanned</small>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </div>
@@ -140,13 +119,14 @@ endblock %} {% block content %}
   style="display: none"
 >
   <div class="col-lg-11">
-    <!-- Results Header -->
     <div
       class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
     >
       <h4 class="mb-0">
         <i class="bi bi-table me-2"></i>Results
-        <span class="badge bg-primary ms-2" id="resultCount">0</span>
+        <span class="badge ms-2" id="resultCount" style="background: #ff6b35"
+          >0</span
+        >
       </h4>
       <div class="d-flex gap-2">
         <input
@@ -170,15 +150,13 @@ endblock %} {% block content %}
             <tr>
               <th>#</th>
               <th>Business Name</th>
-              <th>Owner</th>
               <th>Phone</th>
               <th>Email</th>
               <th>Website</th>
-              <th>Socials</th>
               <th>Address</th>
-              <th>Rating</th>
-              <th>Reviews</th>
-              <th>Category</th>
+              <th>Source</th>
+              <th>Socials</th>
+              <th>Description</th>
             </tr>
           </thead>
           <tbody id="resultsBody"></tbody>
@@ -198,5 +176,5 @@ endblock %} {% block content %}
   </div>
 </div>
 {% endblock %} {% block extra_js %}
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/webcrawler.js') }}"></script>
 {% endblock %}

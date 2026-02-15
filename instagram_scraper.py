@@ -428,6 +428,113 @@ class InstagramScraper:
             logger.debug(f"Strategy-3 error: {e}")
         return results
 
+    # ---- Bing search (secondary engine) --------------------------------
+
+    def _bing_search(self, query: str, num_pages: int = 5) -> list[dict]:
+        """
+        Run a Bing search as secondary engine for more results.
+        Bing is less aggressive with CAPTCHAs than Google.
+        """
+        results: list[dict] = []
+
+        for page in range(num_pages):
+            if self._should_stop:
+                break
+
+            first = page * 10 + 1
+            search_url = (
+                f"https://www.bing.com/search"
+                f"?q={quote_plus(query)}&first={first}&count=10"
+            )
+
+            try:
+                self.driver.get(search_url)
+                time.sleep(2.0 + random.uniform(1.0, 2.0))
+
+                if page == 0:
+                    try:
+                        btn = self.driver.find_element(
+                            By.ID, "bnp_btn_accept"
+                        )
+                        if btn.is_displayed():
+                            btn.click()
+                            time.sleep(1)
+                    except (NoSuchElementException, WebDriverException):
+                        pass
+
+                page_results = self._parse_bing_results()
+                results.extend(page_results)
+
+                try:
+                    self.driver.find_element(
+                        By.CSS_SELECTOR, "a.sb_pagN"
+                    )
+                except NoSuchElementException:
+                    break
+
+            except WebDriverException as e:
+                logger.error(f"Bing error page {page}: {e}")
+                continue
+
+            if page < num_pages - 1:
+                time.sleep(random.uniform(1.5, 3.0))
+
+        return results
+
+    def _parse_bing_results(self) -> list[dict]:
+        """Parse Bing SERP for Instagram URLs."""
+        results = []
+        try:
+            items = self.driver.find_elements(
+                By.CSS_SELECTOR, "li.b_algo"
+            )
+            for item in items:
+                try:
+                    a_tag = item.find_element(By.CSS_SELECTOR, "h2 a")
+                    href = a_tag.get_attribute("href") or ""
+                    if "instagram.com" not in href:
+                        continue
+
+                    title = a_tag.text.strip()
+                    snippet = ""
+                    try:
+                        snippet_el = item.find_element(
+                            By.CSS_SELECTOR, "div.b_caption p"
+                        )
+                        snippet = snippet_el.text.strip()[:300]
+                    except NoSuchElementException:
+                        pass
+
+                    results.append(
+                        {"url": href, "title": title, "snippet": snippet}
+                    )
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.debug(f"Bing parse error: {e}")
+
+        if not results:
+            try:
+                source = self.driver.page_source
+                urls = set(
+                    re.findall(
+                        r'https?://(?:www\.)?instagram\.com/[\w.\-]+',
+                        source,
+                    )
+                )
+                for url in urls:
+                    clean = url.split("?")[0].split("&amp;")[0]
+                    if clean.rstrip("/") in (
+                        "https://www.instagram.com",
+                        "https://instagram.com",
+                    ):
+                        continue
+                    results.append({"url": clean, "title": "", "snippet": ""})
+            except Exception:
+                pass
+
+        return results
+
     # ---- Helpers: extract username from IG URL -------------------------
 
     @staticmethod
@@ -698,13 +805,14 @@ class InstagramScraper:
             total_queries = len(queries)
             all_results: list[dict] = []
 
+            # Phase 1: Google search
             for qi, query in enumerate(queries):
                 if self._should_stop:
                     break
 
-                pct = 5 + int((qi / total_queries) * 45)
+                pct = 5 + int((qi / total_queries) * 30)
                 self._report_progress(
-                    f"Searching Google (query {qi + 1}/{total_queries})…",
+                    f"Google search (query {qi + 1}/{total_queries})…",
                     pct,
                 )
 
@@ -713,6 +821,28 @@ class InstagramScraper:
 
                 if qi < total_queries - 1 and not self._should_stop:
                     time.sleep(random.uniform(4, 8))
+
+            # Phase 2: Bing search (secondary engine)
+            google_count = len(all_results)
+            self._report_progress(
+                f"Google found {google_count} results. Searching Bing…", 40,
+            )
+
+            for qi, query in enumerate(queries):
+                if self._should_stop:
+                    break
+
+                pct = 40 + int((qi / total_queries) * 15)
+                self._report_progress(
+                    f"Bing search (query {qi + 1}/{total_queries})…",
+                    pct,
+                )
+
+                bing_results = self._bing_search(query, num_pages=max_pages)
+                all_results.extend(bing_results)
+
+                if qi < total_queries - 1 and not self._should_stop:
+                    time.sleep(random.uniform(2, 4))
 
             if not all_results:
                 self._report_progress(

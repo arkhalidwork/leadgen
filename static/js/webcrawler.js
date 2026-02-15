@@ -1,11 +1,11 @@
 /**
- * LeadGen — Frontend Application Logic
- * Handles form submission, polling, results display, and CSV download.
+ * LeadGen — Web Crawler Frontend Logic
+ * Handles form submission, polling, results display, and CSV download for the multi-source web crawler.
  */
 
 document.addEventListener("DOMContentLoaded", () => {
   // DOM Elements
-  const form = document.getElementById("scrapeForm");
+  const form = document.getElementById("crawlerForm");
   const keywordInput = document.getElementById("keyword");
   const placeInput = document.getElementById("place");
   const btnScrape = document.getElementById("btnScrape");
@@ -24,71 +24,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const errorSection = document.getElementById("errorSection");
   const errorMessage = document.getElementById("errorMessage");
 
-  // Timer & live stats elements
-  const elapsedTimer = document.getElementById("elapsedTimer");
-  const liveStats = document.getElementById("liveStats");
-  const statAreas = document.getElementById("statAreas");
-  const statLeads = document.getElementById("statLeads");
-  const statWebsites = document.getElementById("statWebsites");
-
   let currentJobId = null;
   let pollInterval = null;
   let allLeads = [];
 
-  // Timer
-  let timerInterval = null;
-  let timerStartTime = null;
-
-  function startTimer() {
-    timerStartTime = Date.now();
-    timerInterval = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - timerStartTime) / 1000);
-      const h = String(Math.floor(elapsed / 3600)).padStart(2, "0");
-      const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, "0");
-      const s = String(elapsed % 60).padStart(2, "0");
-      elapsedTimer.innerHTML = `<i class="bi bi-clock me-1"></i>${h}:${m}:${s}`;
-    }, 1000);
-  }
-
-  function stopTimer() {
-    if (timerInterval) {
-      clearInterval(timerInterval);
-      timerInterval = null;
-    }
-  }
-
-  // Update live stats from server response
-  function updateLiveStats(data) {
-    if (!data.area_stats) return;
-    liveStats.style.display = "";
-    const as = data.area_stats;
-
-    if (as.total_areas > 0) {
-      statAreas.textContent = `${as.completed_areas} / ${as.total_areas}`;
-    }
-    statLeads.textContent = as.leads_found || data.lead_count || 0;
-
-    if (as.websites_total > 0) {
-      statWebsites.textContent = `${as.websites_scanned} / ${as.websites_total}`;
-    } else if (as.completed_areas < as.total_areas) {
-      statWebsites.textContent = "—";
-    }
-  }
-
-  // Sync timer with server elapsed time
-  function syncTimerWithServer(elapsedSeconds) {
-    if (elapsedSeconds && elapsedTimer) {
-      const h = String(Math.floor(elapsedSeconds / 3600)).padStart(2, "0");
-      const m = String(Math.floor((elapsedSeconds % 3600) / 60)).padStart(
-        2,
-        "0",
-      );
-      const s = String(elapsedSeconds % 60).padStart(2, "0");
-      elapsedTimer.innerHTML = `<i class="bi bi-clock me-1"></i>${h}:${m}:${s}`;
-    }
-  }
-
-  // Live preview of search query
+  // Live preview
   function updatePreview() {
     const kw = keywordInput.value.trim() || "keyword";
     const pl = placeInput.value.trim() || "place";
@@ -103,28 +43,22 @@ document.addEventListener("DOMContentLoaded", () => {
     e.preventDefault();
     const keyword = keywordInput.value.trim();
     const place = placeInput.value.trim();
-
     if (!keyword || !place) return;
 
-    // Reset UI
     hideError();
     hideResults();
     showProgress();
     setFormEnabled(false);
-    startTimer();
 
     try {
-      const res = await fetch("/api/scrape", {
+      const res = await fetch("/api/webcrawler/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ keyword, place }),
       });
 
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error || "Failed to start scraping.");
-      }
+      if (!res.ok) throw new Error(data.error || "Failed to start crawling.");
 
       currentJobId = data.job_id;
       startPolling();
@@ -132,36 +66,24 @@ document.addEventListener("DOMContentLoaded", () => {
       showError(err.message);
       hideProgress();
       setFormEnabled(true);
-      stopTimer();
     }
   });
 
   // Stop button
   btnStop.addEventListener("click", async () => {
     if (!currentJobId) return;
-    btnStop.disabled = true;
-    btnStop.innerHTML =
-      '<span class="spinner-border spinner-border-sm me-1"></span>Stopping...';
     try {
-      const res = await fetch(`/api/stop/${currentJobId}`, { method: "POST" });
-      const data = await res.json();
+      await fetch(`/api/webcrawler/stop/${currentJobId}`, { method: "POST" });
       stopPolling();
-      stopTimer();
-      progressTitle.textContent = "Stopped — saving results...";
+      progressTitle.textContent = "Stopped";
       progressSpinner.style.display = "none";
-      progressBar.classList.remove("progress-bar-animated");
       setFormEnabled(true);
-      // Load whatever results were saved
-      await loadResults();
     } catch (err) {
       console.error("Stop failed:", err);
-    } finally {
-      btnStop.disabled = false;
-      btnStop.innerHTML = '<i class="bi bi-stop-circle me-1"></i>Stop';
     }
   });
 
-  // Download button — fetch blob for reliable cross-browser download
+  // Download CSV
   btnDownload.addEventListener("click", async () => {
     if (!currentJobId) return;
     try {
@@ -169,7 +91,7 @@ document.addEventListener("DOMContentLoaded", () => {
       btnDownload.innerHTML =
         '<span class="spinner-border spinner-border-sm me-1"></span>Preparing...';
 
-      const res = await fetch(`/api/download/${currentJobId}`);
+      const res = await fetch(`/api/webcrawler/download/${currentJobId}`);
       if (!res.ok) {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || "Download failed.");
@@ -180,13 +102,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const a = document.createElement("a");
       a.href = url;
 
-      // Try to extract filename from Content-Disposition header
       const cd = res.headers.get("Content-Disposition");
       if (cd) {
         const match = cd.match(/filename=([^;]+)/);
-        a.download = match ? match[1].trim() : `leads_${currentJobId}.csv`;
+        a.download = match ? match[1].trim() : `webcrawler_${currentJobId}.csv`;
       } else {
-        a.download = `leads_${currentJobId}.csv`;
+        a.download = `webcrawler_${currentJobId}.csv`;
       }
 
       document.body.appendChild(a);
@@ -226,22 +147,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function pollStatus() {
     if (!currentJobId) return;
-
     try {
-      const res = await fetch(`/api/status/${currentJobId}`);
+      const res = await fetch(`/api/webcrawler/status/${currentJobId}`);
       const data = await res.json();
 
       updateProgress(data.progress, data.message);
-      updateLiveStats(data);
-
-      // Sync timer with server
-      if (data.elapsed_seconds) {
-        syncTimerWithServer(data.elapsed_seconds);
-      }
 
       if (data.status === "completed") {
         stopPolling();
-        stopTimer();
         progressTitle.textContent = "Complete!";
         progressSpinner.style.display = "none";
         progressBar.classList.remove("progress-bar-animated");
@@ -249,23 +162,13 @@ document.addEventListener("DOMContentLoaded", () => {
         await loadResults();
       } else if (data.status === "failed") {
         stopPolling();
-        stopTimer();
-        // Even on failure, try to load partial results
-        if (data.lead_count > 0) {
-          progressTitle.textContent = `Error — but ${data.lead_count} leads saved`;
-          progressSpinner.style.display = "none";
-          await loadResults();
-        } else {
-          hideProgress();
-          showError(data.error || "Scraping failed.");
-        }
+        hideProgress();
+        showError(data.error || "Crawling failed.");
         setFormEnabled(true);
       } else if (data.status === "stopped") {
         stopPolling();
-        stopTimer();
-        progressTitle.textContent = `Stopped — ${data.lead_count} leads saved`;
+        progressTitle.textContent = "Stopped";
         progressSpinner.style.display = "none";
-        progressBar.classList.remove("progress-bar-animated");
         setFormEnabled(true);
         if (data.lead_count > 0) {
           await loadResults();
@@ -278,9 +181,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
   async function loadResults() {
     try {
-      const res = await fetch(`/api/results/${currentJobId}`);
+      const res = await fetch(`/api/webcrawler/results/${currentJobId}`);
       const data = await res.json();
-
       if (res.ok && data.leads) {
         allLeads = data.leads;
         resultCount.textContent = data.total;
@@ -292,17 +194,15 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Render
+  // Render leads table
   function renderLeads(leads) {
     resultsBody.innerHTML = "";
 
     if (leads.length === 0) {
       resultsBody.innerHTML = `
-                <tr>
-                    <td colspan="11" class="text-center text-muted py-4">
-                        No results found.
-                    </td>
-                </tr>`;
+        <tr>
+          <td colspan="9" class="text-center text-muted py-4">No results found.</td>
+        </tr>`;
       return;
     }
 
@@ -325,8 +225,6 @@ document.addEventListener("DOMContentLoaded", () => {
         { key: "twitter", icon: "bi-twitter-x", color: "#fff" },
         { key: "linkedin", icon: "bi-linkedin", color: "#0A66C2" },
         { key: "youtube", icon: "bi-youtube", color: "#FF0000" },
-        { key: "tiktok", icon: "bi-tiktok", color: "#fff" },
-        { key: "pinterest", icon: "bi-pinterest", color: "#E60023" },
       ];
       socialPlatforms.forEach((p) => {
         if (lead[p.key] && lead[p.key] !== "N/A") {
@@ -339,18 +237,16 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const row = document.createElement("tr");
       row.innerHTML = `
-                <td>${idx + 1}</td>
-                <td class="fw-semibold">${escapeHtml(lead.business_name)}</td>
-                <td>${escapeHtml(lead.owner_name)}</td>
-                <td>${escapeHtml(lead.phone)}</td>
-                <td class="cell-truncate-sm">${email}</td>
-                <td class="cell-truncate-sm">${website}</td>
-                <td style="white-space:nowrap">${socialsHtml}</td>
-                <td class="cell-truncate">${escapeHtml(lead.address)}</td>
-                <td>${escapeHtml(lead.rating)}</td>
-                <td>${escapeHtml(lead.reviews)}</td>
-                <td><span class="badge bg-secondary">${escapeHtml(lead.category)}</span></td>
-            `;
+        <td>${idx + 1}</td>
+        <td class="fw-semibold">${escapeHtml(lead.business_name || "")}</td>
+        <td>${escapeHtml(lead.phone || "N/A")}</td>
+        <td class="cell-truncate-sm">${email}</td>
+        <td class="cell-truncate-sm">${website}</td>
+        <td class="cell-truncate">${escapeHtml(lead.address || "N/A")}</td>
+        <td><span class="badge bg-secondary">${escapeHtml(lead.source || "web")}</span></td>
+        <td style="white-space:nowrap">${socialsHtml}</td>
+        <td class="cell-truncate">${escapeHtml(truncate(lead.description || "", 50))}</td>
+      `;
       resultsBody.appendChild(row);
     });
   }
@@ -361,11 +257,8 @@ document.addEventListener("DOMContentLoaded", () => {
     progressBar.style.width = "0%";
     progressBar.classList.add("progress-bar-animated");
     progressMessage.textContent = "Starting...";
-    progressTitle.textContent = "Scraping in progress...";
+    progressTitle.textContent = "Crawling in progress...";
     progressSpinner.style.display = "";
-    if (liveStats) liveStats.style.display = "none";
-    if (elapsedTimer)
-      elapsedTimer.innerHTML = '<i class="bi bi-clock me-1"></i>00:00:00';
   }
 
   function hideProgress() {
@@ -400,7 +293,7 @@ document.addEventListener("DOMContentLoaded", () => {
       btnScrape.innerHTML = '<i class="bi bi-rocket-takeoff me-1"></i>Go';
     } else {
       btnScrape.innerHTML =
-        '<span class="spinner-border spinner-border-sm me-1"></span>Working...';
+        '<span class="spinner-border spinner-border-sm me-1"></span>Crawling...';
     }
   }
 

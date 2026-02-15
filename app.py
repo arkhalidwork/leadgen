@@ -14,6 +14,7 @@ from flask_cors import CORS
 from scraper import GoogleMapsScraper, clean_leads
 from linkedin_scraper import LinkedInScraper, clean_linkedin_leads
 from instagram_scraper import InstagramScraper, clean_instagram_leads
+from web_crawler import WebCrawlerScraper, clean_web_leads
 
 app = Flask(__name__)
 CORS(app)
@@ -22,6 +23,7 @@ CORS(app)
 scraping_jobs = {}          # Google Maps jobs
 linkedin_jobs = {}          # LinkedIn jobs
 instagram_jobs = {}         # Instagram jobs
+webcrawler_jobs = {}        # Web Crawler jobs
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -45,6 +47,7 @@ class ScrapingJob:
         self.csv_path = None
         self.scraper = None
         self.created_at = datetime.now().isoformat()
+        self.started_at = datetime.now()  # for timer
 
     def update_progress(self, message: str, percentage: int):
         self.message = message
@@ -52,6 +55,17 @@ class ScrapingJob:
             self.progress = percentage
 
     def to_dict(self):
+        # Elapsed time
+        elapsed = (datetime.now() - self.started_at).total_seconds()
+        hours, rem = divmod(int(elapsed), 3600)
+        minutes, secs = divmod(rem, 60)
+        elapsed_str = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+        # Area stats from scraper
+        area_stats = {}
+        if self.scraper:
+            area_stats = self.scraper.area_stats
+
         return {
             "id": self.id,
             "keyword": self.keyword,
@@ -62,6 +76,9 @@ class ScrapingJob:
             "lead_count": len(self.leads),
             "error": self.error,
             "created_at": self.created_at,
+            "elapsed": elapsed_str,
+            "elapsed_seconds": int(elapsed),
+            "area_stats": area_stats,
         }
 
 
@@ -137,6 +154,40 @@ class InstagramJob:
         }
 
 
+class WebCrawlerJob:
+    """Tracks a Web Crawler scraping job."""
+
+    def __init__(self, keyword: str, place: str):
+        self.id = str(uuid.uuid4())[:8]
+        self.keyword = keyword
+        self.place = place
+        self.status = "running"
+        self.progress = 0
+        self.message = "Starting..."
+        self.leads = []
+        self.error = None
+        self.scraper = None
+        self.created_at = datetime.now().isoformat()
+
+    def update_progress(self, message: str, percentage: int):
+        self.message = message
+        if percentage >= 0:
+            self.progress = percentage
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "keyword": self.keyword,
+            "place": self.place,
+            "status": self.status,
+            "progress": self.progress,
+            "message": self.message,
+            "lead_count": len(self.leads),
+            "error": self.error,
+            "created_at": self.created_at,
+        }
+
+
 # ============================================================
 # Background runners
 # ============================================================
@@ -161,14 +212,38 @@ def run_scraping_job(job: ScrapingJob):
             save_gmaps_csv(cleaned, csv_path)
             job.csv_path = csv_path
 
+        if job.status == "stopped":
+            # User stopped mid-way — save partial results
+            partial = scraper.get_partial_leads()
+            if partial:
+                cleaned = clean_leads(partial)
+                job.leads = cleaned
+                if cleaned:
+                    filename = (
+                        f"leads_{job.keyword}_{job.place}_{job.id}_partial.csv"
+                        .replace(" ", "_").lower()
+                    )
+                    csv_path = os.path.join(OUTPUT_DIR, filename)
+                    save_gmaps_csv(cleaned, csv_path)
+                    job.csv_path = csv_path
+            job.message = f"Stopped. Saved {len(job.leads)} leads."
+            return
+
         job.status = "completed"
         job.progress = 100
         job.message = f"Done! Found {len(cleaned)} leads."
 
     except Exception as e:
-        job.status = "failed"
-        job.error = str(e)
-        job.message = f"Error: {str(e)}"
+        # On error, still save partial results
+        if job.scraper:
+            partial = job.scraper.get_partial_leads()
+            if partial:
+                cleaned = clean_leads(partial)
+                job.leads = cleaned
+        if job.status != "stopped":
+            job.status = "failed"
+            job.error = str(e)
+            job.message = f"Error: {str(e)}. Saved {len(job.leads)} partial leads."
 
 
 def run_linkedin_job(job: LinkedInJob):
@@ -208,6 +283,27 @@ def run_instagram_job(job: InstagramJob):
         job.status = "completed"
         job.progress = 100
         job.message = f"Done! Found {len(cleaned)} Instagram {job.search_type}."
+
+    except Exception as e:
+        job.status = "failed"
+        job.error = str(e)
+        job.message = f"Error: {str(e)}"
+
+
+def run_webcrawler_job(job: WebCrawlerJob):
+    """Run Web Crawler scraping in a background thread."""
+    try:
+        scraper = WebCrawlerScraper(headless=True)
+        job.scraper = scraper
+        scraper.set_progress_callback(job.update_progress)
+
+        raw = scraper.scrape(job.keyword, job.place)
+        cleaned = clean_web_leads(raw)
+        job.leads = cleaned
+
+        job.status = "completed"
+        job.progress = 100
+        job.message = f"Done! Found {len(cleaned)} leads from the web."
 
     except Exception as e:
         job.status = "failed"
@@ -262,6 +358,12 @@ def instagram_tool():
     return render_template("instagram.html", active_page="instagram")
 
 
+@app.route("/tools/web-crawler")
+def webcrawler_tool():
+    """Web Crawler page."""
+    return render_template("webcrawler.html", active_page="webcrawler")
+
+
 # ============================================================
 # Google Maps API
 # ============================================================
@@ -298,7 +400,7 @@ def job_results(job_id):
     job = scraping_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
-    if job.status != "completed":
+    if job.status not in ("completed", "stopped"):
         return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
     return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
 
@@ -308,7 +410,7 @@ def download_csv(job_id):
     job = scraping_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
-    if job.status != "completed" or not job.leads:
+    if job.status not in ("completed", "stopped") or not job.leads:
         return jsonify({"error": "No data available for download."}), 400
 
     output = io.StringIO()
@@ -348,9 +450,14 @@ def stop_scrape(job_id):
         return jsonify({"error": "Job not found."}), 404
     if job.scraper:
         job.scraper.stop()
+        # Immediately grab partial leads
+        partial = job.scraper.get_partial_leads()
+        if partial:
+            cleaned = clean_leads(partial)
+            job.leads = cleaned
     job.status = "stopped"
-    job.message = "Scraping stopped by user."
-    return jsonify({"message": "Job stop requested."})
+    job.message = f"Stopped by user. Saved {len(job.leads)} leads."
+    return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
 
 
 # ============================================================
@@ -538,6 +645,95 @@ def instagram_download(job_id):
 @app.route("/api/instagram/stop/<job_id>", methods=["POST"])
 def instagram_stop(job_id):
     job = instagram_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+    if job.scraper:
+        job.scraper.stop()
+    job.status = "stopped"
+    job.message = "Scraping stopped by user."
+    return jsonify({"message": "Job stop requested."})
+
+
+# ============================================================
+# Web Crawler API
+# ============================================================
+
+@app.route("/api/webcrawler/scrape", methods=["POST"])
+def webcrawler_start_scrape():
+    """Start a new Web Crawler scraping job."""
+    data = request.get_json()
+    keyword = data.get("keyword", "").strip()
+    place = data.get("place", "").strip()
+
+    if not keyword or not place:
+        return jsonify({"error": "Both keyword and place are required."}), 400
+
+    job = WebCrawlerJob(keyword, place)
+    webcrawler_jobs[job.id] = job
+
+    thread = threading.Thread(target=run_webcrawler_job, args=(job,), daemon=True)
+    thread.start()
+
+    return jsonify({"job_id": job.id, "message": "Web crawling started."}), 202
+
+
+@app.route("/api/webcrawler/status/<job_id>")
+def webcrawler_status(job_id):
+    job = webcrawler_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+    return jsonify(job.to_dict())
+
+
+@app.route("/api/webcrawler/results/<job_id>")
+def webcrawler_results(job_id):
+    job = webcrawler_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+    if job.status != "completed":
+        return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
+    return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
+
+
+@app.route("/api/webcrawler/download/<job_id>")
+def webcrawler_download(job_id):
+    job = webcrawler_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found."}), 404
+    if job.status != "completed" or not job.leads:
+        return jsonify({"error": "No data available for download."}), 400
+
+    output = io.StringIO()
+    fieldnames = [
+        "Business Name", "Phone", "Email", "Website", "Address",
+        "Description", "Source", "Facebook", "Instagram",
+        "Twitter", "LinkedIn", "YouTube",
+    ]
+    key_map = {
+        "Business Name": "business_name", "Phone": "phone",
+        "Email": "email", "Website": "website",
+        "Address": "address", "Description": "description",
+        "Source": "source", "Facebook": "facebook",
+        "Instagram": "instagram", "Twitter": "twitter",
+        "LinkedIn": "linkedin", "YouTube": "youtube",
+    }
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for lead in job.leads:
+        row = {display: lead.get(key, "N/A") for display, key in key_map.items()}
+        writer.writerow(row)
+
+    output.seek(0)
+    filename = f"webcrawler_{job.keyword}_{job.place}.csv".replace(" ", "_").lower()
+    return Response(
+        output.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/webcrawler/stop/<job_id>", methods=["POST"])
+def webcrawler_stop(job_id):
+    job = webcrawler_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
     if job.scraper:

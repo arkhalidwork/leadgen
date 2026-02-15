@@ -45,8 +45,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
-# Copy ALL application code (including instagram_scraper.py)
-COPY app.py scraper.py linkedin_scraper.py instagram_scraper.py ./
+# Copy ALL application code
+COPY app.py scraper.py linkedin_scraper.py instagram_scraper.py web_crawler.py ./
 COPY templates/ templates/
 COPY static/ static/
 

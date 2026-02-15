@@ -1,41 +1,39 @@
-{% extends "base.html" %}
-{% block title %}LeadGen — Dashboard{% endblock %}
-
-{% block content %}
+{% extends "base.html" %} {% block title %}LeadGen — Dashboard{% endblock %} {%
+block content %}
 <!-- Hero -->
 <div class="text-center mb-5">
   <h1 class="display-5 fw-bold mb-2">
     <i class="bi bi-boxes text-primary me-2"></i>LeadGen Suite
   </h1>
   <p class="lead text-muted col-lg-8 mx-auto">
-    Powerful lead generation tools to find business contacts, emails, and social profiles from Google Maps and LinkedIn.
+    Powerful lead generation tools to find business contacts, emails, and social
+    profiles from Google Maps, LinkedIn, Instagram, and the open web.
   </p>
 </div>
 
 <!-- Tool Cards Grid -->
 <div class="row g-4 justify-content-center mb-5">
   <!-- Google Maps Tool -->
-  <div class="col-md-6 col-lg-5">
+  <div class="col-md-6 col-lg-3">
     <a href="/tools/google-maps" class="text-decoration-none">
       <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 p-lg-5 text-center">
+        <div class="card-body p-4 text-center">
           <div class="tool-icon tool-icon-maps mb-3">
             <i class="bi bi-geo-alt-fill"></i>
           </div>
-          <h3 class="card-title fw-bold mb-2">Google Maps Scraper</h3>
-          <p class="text-muted mb-3">
-            Search businesses on Google Maps by keyword &amp; location. Extract contact details, emails, social profiles, and export as CSV.
+          <h5 class="card-title fw-bold mb-2">Google Maps</h5>
+          <p class="text-muted small mb-3">
+            Search businesses by keyword &amp; location. Scrapes sub-areas for
+            maximum coverage.
           </p>
-          <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
             <span class="badge tool-badge">Phone</span>
             <span class="badge tool-badge">Email</span>
             <span class="badge tool-badge">Website</span>
             <span class="badge tool-badge">Socials</span>
-            <span class="badge tool-badge">Address</span>
-            <span class="badge tool-badge">Rating</span>
           </div>
-          <span class="btn btn-primary btn-sm px-4">
-            <i class="bi bi-arrow-right me-1"></i>Open Tool
+          <span class="btn btn-primary btn-sm px-3">
+            <i class="bi bi-arrow-right me-1"></i>Open
           </span>
         </div>
       </div>
@@ -43,27 +41,91 @@
   </div>
 
   <!-- LinkedIn Tool -->
-  <div class="col-md-6 col-lg-5">
+  <div class="col-md-6 col-lg-3">
     <a href="/tools/linkedin" class="text-decoration-none">
       <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 p-lg-5 text-center">
+        <div class="card-body p-4 text-center">
           <div class="tool-icon tool-icon-linkedin mb-3">
             <i class="bi bi-linkedin"></i>
           </div>
-          <h3 class="card-title fw-bold mb-2">LinkedIn Scraper</h3>
-          <p class="text-muted mb-3">
-            Find people and companies on LinkedIn by niche &amp; location. Extract profiles, titles, company info, and export as CSV.
+          <h5 class="card-title fw-bold mb-2">LinkedIn</h5>
+          <p class="text-muted small mb-3">
+            Find profiles &amp; companies via Google + Bing dual-engine search.
           </p>
-          <div class="d-flex flex-wrap justify-content-center gap-2 mb-3">
+          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
             <span class="badge tool-badge">Profiles</span>
             <span class="badge tool-badge">Companies</span>
             <span class="badge tool-badge">Title</span>
-            <span class="badge tool-badge">Location</span>
-            <span class="badge tool-badge">Industry</span>
             <span class="badge tool-badge">URL</span>
           </div>
-          <span class="btn btn-primary btn-sm px-4">
-            <i class="bi bi-arrow-right me-1"></i>Open Tool
+          <span class="btn btn-primary btn-sm px-3">
+            <i class="bi bi-arrow-right me-1"></i>Open
+          </span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Instagram Tool -->
+  <div class="col-md-6 col-lg-3">
+    <a href="/tools/instagram" class="text-decoration-none">
+      <div class="card tool-card h-100 border-0 shadow-lg">
+        <div class="card-body p-4 text-center">
+          <div
+            class="tool-icon"
+            style="
+              background: linear-gradient(135deg, #e4405f, #c13584);
+              color: #fff;
+            "
+          >
+            <i class="bi bi-instagram"></i>
+          </div>
+          <h5 class="card-title fw-bold mb-2 mt-3">Instagram</h5>
+          <p class="text-muted small mb-3">
+            Scrape emails &amp; executive profiles from Instagram via Google +
+            Bing.
+          </p>
+          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
+            <span class="badge tool-badge">Emails</span>
+            <span class="badge tool-badge">Profiles</span>
+            <span class="badge tool-badge">Bio</span>
+            <span class="badge tool-badge">Role</span>
+          </div>
+          <span class="btn btn-danger btn-sm px-3">
+            <i class="bi bi-arrow-right me-1"></i>Open
+          </span>
+        </div>
+      </div>
+    </a>
+  </div>
+
+  <!-- Web Crawler Tool -->
+  <div class="col-md-6 col-lg-3">
+    <a href="/tools/web-crawler" class="text-decoration-none">
+      <div class="card tool-card h-100 border-0 shadow-lg">
+        <div class="card-body p-4 text-center">
+          <div
+            class="tool-icon"
+            style="
+              background: linear-gradient(135deg, #ff6b35, #f7c948);
+              color: #fff;
+            "
+          >
+            <i class="bi bi-globe2"></i>
+          </div>
+          <h5 class="card-title fw-bold mb-2 mt-3">Web Crawler</h5>
+          <p class="text-muted small mb-3">
+            Multi-source crawler: Google + Bing + website deep-scraping for
+            massive lead databases.
+          </p>
+          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
+            <span class="badge tool-badge">Email</span>
+            <span class="badge tool-badge">Phone</span>
+            <span class="badge tool-badge">Socials</span>
+            <span class="badge tool-badge">Address</span>
+          </div>
+          <span class="btn btn-warning btn-sm px-3 text-dark">
+            <i class="bi bi-arrow-right me-1"></i>Open
           </span>
         </div>
       </div>
@@ -75,7 +137,7 @@
 <div class="row g-3 justify-content-center">
   <div class="col-sm-6 col-md-3">
     <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number text-primary">2</div>
+      <div class="stat-number text-primary">4</div>
       <div class="text-muted small">Scraping Tools</div>
     </div>
   </div>
@@ -87,14 +149,14 @@
   </div>
   <div class="col-sm-6 col-md-3">
     <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number" style="color:#E4405F">7+</div>
+      <div class="stat-number" style="color: #e4405f">7+</div>
       <div class="text-muted small">Social Platforms</div>
     </div>
   </div>
   <div class="col-sm-6 col-md-3">
     <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number" style="color:#f0c040">&#9889;</div>
-      <div class="text-muted small">Parallel Scraping</div>
+      <div class="stat-number" style="color: #f0c040">&#9889;</div>
+      <div class="text-muted small">Dual-Engine Search</div>
     </div>
   </div>
 </div>
