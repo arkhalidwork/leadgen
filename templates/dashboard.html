@@ -1,163 +1,267 @@
 {% extends "base.html" %} {% block title %}LeadGen — Dashboard{% endblock %} {%
-block content %}
-<!-- Hero -->
-<div class="text-center mb-5">
-  <h1 class="display-5 fw-bold mb-2">
-    <i class="bi bi-boxes text-primary me-2"></i>LeadGen Suite
-  </h1>
-  <p class="lead text-muted col-lg-8 mx-auto">
-    Powerful lead generation tools to find business contacts, emails, and social
-    profiles from Google Maps, LinkedIn, Instagram, and the open web.
-  </p>
-</div>
+block topbar_title %}
+<h5 class="mb-0 fw-semibold">Dashboard</h5>
+{% endblock %} {% block extra_css %}
+<style>
+  .quality-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+  .quality-dot-strong {
+    background: #28a745;
+  }
+  .quality-dot-medium {
+    background: #ffc107;
+  }
+  .quality-dot-weak {
+    background: #dc3545;
+  }
+  .quality-bar {
+    height: 8px;
+    border-radius: 4px;
+  }
+</style>
+{% endblock %} {% block content %}
 
-<!-- Tool Cards Grid -->
-<div class="row g-4 justify-content-center mb-5">
-  <!-- Google Maps Tool -->
-  <div class="col-md-6 col-lg-3">
-    <a href="/tools/google-maps" class="text-decoration-none">
-      <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 text-center">
-          <div class="tool-icon tool-icon-maps mb-3">
-            <i class="bi bi-geo-alt-fill"></i>
-          </div>
-          <h5 class="card-title fw-bold mb-2">Google Maps</h5>
-          <p class="text-muted small mb-3">
-            Search businesses by keyword &amp; location. Scrapes sub-areas for
-            maximum coverage.
-          </p>
-          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
-            <span class="badge tool-badge">Phone</span>
-            <span class="badge tool-badge">Email</span>
-            <span class="badge tool-badge">Website</span>
-            <span class="badge tool-badge">Socials</span>
-          </div>
-          <span class="btn btn-primary btn-sm px-3">
-            <i class="bi bi-arrow-right me-1"></i>Open
-          </span>
+<!-- Stats Row -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="card stat-card border-0 p-3">
+      <div class="d-flex align-items-center gap-3">
+        <div class="stat-icon bg-primary-subtle text-primary">
+          <i class="bi bi-people-fill"></i>
+        </div>
+        <div>
+          <div class="stat-number" id="statTotalLeads">—</div>
+          <div class="text-muted small">Total Leads</div>
         </div>
       </div>
-    </a>
-  </div>
-
-  <!-- LinkedIn Tool -->
-  <div class="col-md-6 col-lg-3">
-    <a href="/tools/linkedin" class="text-decoration-none">
-      <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 text-center">
-          <div class="tool-icon tool-icon-linkedin mb-3">
-            <i class="bi bi-linkedin"></i>
-          </div>
-          <h5 class="card-title fw-bold mb-2">LinkedIn</h5>
-          <p class="text-muted small mb-3">
-            Find profiles &amp; companies via Google + Bing dual-engine search.
-          </p>
-          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
-            <span class="badge tool-badge">Profiles</span>
-            <span class="badge tool-badge">Companies</span>
-            <span class="badge tool-badge">Title</span>
-            <span class="badge tool-badge">URL</span>
-          </div>
-          <span class="btn btn-primary btn-sm px-3">
-            <i class="bi bi-arrow-right me-1"></i>Open
-          </span>
-        </div>
-      </div>
-    </a>
-  </div>
-
-  <!-- Instagram Tool -->
-  <div class="col-md-6 col-lg-3">
-    <a href="/tools/instagram" class="text-decoration-none">
-      <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 text-center">
-          <div
-            class="tool-icon"
-            style="
-              background: linear-gradient(135deg, #e4405f, #c13584);
-              color: #fff;
-            "
-          >
-            <i class="bi bi-instagram"></i>
-          </div>
-          <h5 class="card-title fw-bold mb-2 mt-3">Instagram</h5>
-          <p class="text-muted small mb-3">
-            Scrape emails &amp; executive profiles from Instagram via Google +
-            Bing.
-          </p>
-          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
-            <span class="badge tool-badge">Emails</span>
-            <span class="badge tool-badge">Profiles</span>
-            <span class="badge tool-badge">Bio</span>
-            <span class="badge tool-badge">Role</span>
-          </div>
-          <span class="btn btn-danger btn-sm px-3">
-            <i class="bi bi-arrow-right me-1"></i>Open
-          </span>
-        </div>
-      </div>
-    </a>
-  </div>
-
-  <!-- Web Crawler Tool -->
-  <div class="col-md-6 col-lg-3">
-    <a href="/tools/web-crawler" class="text-decoration-none">
-      <div class="card tool-card h-100 border-0 shadow-lg">
-        <div class="card-body p-4 text-center">
-          <div
-            class="tool-icon"
-            style="
-              background: linear-gradient(135deg, #ff6b35, #f7c948);
-              color: #fff;
-            "
-          >
-            <i class="bi bi-globe2"></i>
-          </div>
-          <h5 class="card-title fw-bold mb-2 mt-3">Web Crawler</h5>
-          <p class="text-muted small mb-3">
-            Multi-source crawler: Google + Bing + website deep-scraping for
-            massive lead databases.
-          </p>
-          <div class="d-flex flex-wrap justify-content-center gap-1 mb-3">
-            <span class="badge tool-badge">Email</span>
-            <span class="badge tool-badge">Phone</span>
-            <span class="badge tool-badge">Socials</span>
-            <span class="badge tool-badge">Address</span>
-          </div>
-          <span class="btn btn-warning btn-sm px-3 text-dark">
-            <i class="bi bi-arrow-right me-1"></i>Open
-          </span>
-        </div>
-      </div>
-    </a>
-  </div>
-</div>
-
-<!-- Stats / Quick Info -->
-<div class="row g-3 justify-content-center">
-  <div class="col-sm-6 col-md-3">
-    <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number text-primary">4</div>
-      <div class="text-muted small">Scraping Tools</div>
     </div>
   </div>
-  <div class="col-sm-6 col-md-3">
-    <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number text-success">CSV</div>
-      <div class="text-muted small">Export Format</div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card border-0 p-3">
+      <div class="d-flex align-items-center gap-3">
+        <div class="stat-icon bg-success-subtle text-success">
+          <i class="bi bi-check-circle-fill"></i>
+        </div>
+        <div>
+          <div class="stat-number text-success" id="statStrong">—</div>
+          <div class="text-muted small">Strong Leads</div>
+        </div>
+      </div>
     </div>
   </div>
-  <div class="col-sm-6 col-md-3">
-    <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number" style="color: #e4405f">7+</div>
-      <div class="text-muted small">Social Platforms</div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card border-0 p-3">
+      <div class="d-flex align-items-center gap-3">
+        <div class="stat-icon bg-warning-subtle text-warning">
+          <i class="bi bi-exclamation-circle-fill"></i>
+        </div>
+        <div>
+          <div class="stat-number text-warning" id="statMedium">—</div>
+          <div class="text-muted small">Medium Leads</div>
+        </div>
+      </div>
     </div>
   </div>
-  <div class="col-sm-6 col-md-3">
-    <div class="card stat-card border-0 text-center p-3">
-      <div class="stat-number" style="color: #f0c040">&#9889;</div>
-      <div class="text-muted small">Dual-Engine Search</div>
+  <div class="col-6 col-md-3">
+    <div class="card stat-card border-0 p-3">
+      <div class="d-flex align-items-center gap-3">
+        <div class="stat-icon bg-danger-subtle text-danger">
+          <i class="bi bi-x-circle-fill"></i>
+        </div>
+        <div>
+          <div class="stat-number text-danger" id="statWeak">—</div>
+          <div class="text-muted small">Weak Leads</div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
+
+<!-- Charts Row -->
+<div class="row g-4 mb-4">
+  <!-- Quality Breakdown -->
+  <div class="col-md-5 col-lg-4">
+    <div class="card border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-semibold mb-3">
+          <i class="bi bi-pie-chart-fill text-primary me-2"></i>Lead Quality
+        </h6>
+        <div class="d-flex justify-content-center mb-3">
+          <canvas id="qualityChart" width="200" height="200"></canvas>
+        </div>
+        <div class="d-flex flex-column gap-2">
+          <div class="d-flex align-items-center justify-content-between">
+            <span
+              ><span class="quality-dot quality-dot-strong"></span>Strong</span
+            >
+            <span class="fw-semibold" id="qualityStrongPct">0%</span>
+          </div>
+          <div class="d-flex align-items-center justify-content-between">
+            <span
+              ><span class="quality-dot quality-dot-medium"></span>Medium</span
+            >
+            <span class="fw-semibold" id="qualityMediumPct">0%</span>
+          </div>
+          <div class="d-flex align-items-center justify-content-between">
+            <span><span class="quality-dot quality-dot-weak"></span>Weak</span>
+            <span class="fw-semibold" id="qualityWeakPct">0%</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 7-Day Trend -->
+  <div class="col-md-7 col-lg-8">
+    <div class="card border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-semibold mb-3">
+          <i class="bi bi-graph-up text-primary me-2"></i>Leads (Last 7 Days)
+        </h6>
+        <canvas id="trendChart" height="200"></canvas>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tool Breakdown + Quick Launch -->
+<div class="row g-4 mb-4">
+  <!-- Per-Tool Stats -->
+  <div class="col-md-6">
+    <div class="card border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-semibold mb-3">
+          <i class="bi bi-bar-chart-fill text-primary me-2"></i>By Tool
+        </h6>
+        <div class="table-responsive">
+          <table class="table table-dark table-hover mb-0">
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th class="text-end">Scrapes</th>
+                <th class="text-end">Leads</th>
+              </tr>
+            </thead>
+            <tbody id="toolStatsBody">
+              <tr>
+                <td colspan="3" class="text-center text-muted">Loading...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Quick Launch -->
+  <div class="col-md-6">
+    <div class="card border-0 h-100">
+      <div class="card-body">
+        <h6 class="fw-semibold mb-3">
+          <i class="bi bi-rocket-takeoff-fill text-primary me-2"></i>Quick
+          Launch
+        </h6>
+        <div class="d-flex flex-column gap-2">
+          <a href="/tools/google-maps" class="quick-launch-btn">
+            <div
+              class="ql-icon"
+              style="background: linear-gradient(135deg, #4285f4, #34a853)"
+            >
+              <i class="bi bi-geo-alt-fill"></i>
+            </div>
+            <div class="flex-grow-1">
+              <div class="fw-semibold">Google Maps</div>
+              <div class="text-muted small">
+                Business contacts, phones, emails
+              </div>
+            </div>
+            <i class="bi bi-chevron-right text-muted"></i>
+          </a>
+          <a href="/tools/linkedin" class="quick-launch-btn">
+            <div
+              class="ql-icon"
+              style="background: linear-gradient(135deg, #0a66c2, #0077b5)"
+            >
+              <i class="bi bi-linkedin"></i>
+            </div>
+            <div class="flex-grow-1">
+              <div class="fw-semibold">LinkedIn</div>
+              <div class="text-muted small">Profiles & companies</div>
+            </div>
+            <i class="bi bi-chevron-right text-muted"></i>
+          </a>
+          <a href="/tools/instagram" class="quick-launch-btn">
+            <div
+              class="ql-icon"
+              style="background: linear-gradient(135deg, #e4405f, #c13584)"
+            >
+              <i class="bi bi-instagram"></i>
+            </div>
+            <div class="flex-grow-1">
+              <div class="fw-semibold">Instagram</div>
+              <div class="text-muted small">Emails & social profiles</div>
+            </div>
+            <i class="bi bi-chevron-right text-muted"></i>
+          </a>
+          <a href="/tools/web-crawler" class="quick-launch-btn">
+            <div
+              class="ql-icon"
+              style="background: linear-gradient(135deg, #ff6b35, #f7c948)"
+            >
+              <i class="bi bi-globe2"></i>
+            </div>
+            <div class="flex-grow-1">
+              <div class="fw-semibold">Web Crawler</div>
+              <div class="text-muted small">Deep-scrape websites for leads</div>
+            </div>
+            <i class="bi bi-chevron-right text-muted"></i>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Scrape History -->
+<div class="card border-0 mb-4">
+  <div class="card-body">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h6 class="fw-semibold mb-0">
+        <i class="bi bi-clock-history text-primary me-2"></i>Recent Scrapes
+      </h6>
+      <span class="text-muted small" id="historyCount"></span>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-dark table-hover mb-0">
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Keyword</th>
+            <th>Location</th>
+            <th class="text-end">Leads</th>
+            <th class="text-center">Quality</th>
+            <th>Status</th>
+            <th>Date</th>
+          </tr>
+        </thead>
+        <tbody id="historyBody">
+          <tr>
+            <td colspan="7" class="text-center text-muted py-4">
+              Loading history...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+{% endblock %} {% block extra_js %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 {% endblock %}

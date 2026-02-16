@@ -1,5 +1,6 @@
 /**
  * LeadGen — Instagram Tool Frontend Logic
+ * Supports: Profile Search & Business Search modes
  */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -18,10 +19,8 @@ document.addEventListener("DOMContentLoaded", () => {
   const progressTitle = document.getElementById("progressTitle");
   const progressSpinner = document.getElementById("progressSpinner");
   const resultsSection = document.getElementById("resultsSection");
-  const emailsTableCard = document.getElementById("emailsTableCard");
-  const profilesTableCard = document.getElementById("profilesTableCard");
-  const emailsBody = document.getElementById("emailsBody");
-  const profilesBody = document.getElementById("profilesBody");
+  const leadsTableCard = document.getElementById("leadsTableCard");
+  const leadsBody = document.getElementById("leadsBody");
   const resultCount = document.getElementById("resultCount");
   const filterInput = document.getElementById("filterInput");
   const errorSection = document.getElementById("errorSection");
@@ -30,11 +29,12 @@ document.addEventListener("DOMContentLoaded", () => {
   let currentJobId = null;
   let pollInterval = null;
   let allLeads = [];
-  let currentSearchType = "emails";
+  let currentSearchType = "profiles";
   let timerInterval = null;
   let timerStart = null;
 
-  // Timer helpers
+  // ---- Timer helpers ---------------------------------------------------
+
   function startTimer() {
     timerStart = Date.now();
     const el = document.getElementById("elapsedTimer");
@@ -67,14 +67,19 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
+  // ---- Live stats ------------------------------------------------------
+
   function updateLiveStats(data) {
     const liveStats = document.getElementById("liveStats");
     if (!data.scrape_stats) return;
     if (liveStats) liveStats.style.display = "";
     const stats = data.scrape_stats;
+
     const statQueries = document.getElementById("statQueries");
     const statLeads = document.getElementById("statLeads");
     const statParsed = document.getElementById("statParsed");
+    const statEngines = document.getElementById("statEngines");
+
     if (statQueries)
       statQueries.textContent = `${stats.queries_completed || 0} / ${stats.total_queries || 0}`;
     if (statLeads) statLeads.textContent = stats.leads_found || 0;
@@ -82,39 +87,48 @@ document.addEventListener("DOMContentLoaded", () => {
       statParsed.textContent = stats.total_results
         ? `${stats.results_parsed || 0} / ${stats.total_results}`
         : "—";
+    if (statEngines) {
+      const d = stats.ddg_results || 0;
+      const g = stats.google_results || 0;
+      const b = stats.bing_results || 0;
+      statEngines.textContent = `${d} / ${g} / ${b}`;
+    }
   }
 
-  // Update label & preview when mode changes
+  // ---- Mode preview ----------------------------------------------------
+
   function updatePreview() {
     const kw = keywordsInput.value.trim();
     const p = placeInput.value.trim() || "place";
     const t = searchTypeSelect.value;
 
-    if (t === "emails") {
-      keywordsLabel.textContent = "Keywords (optional)";
-      keywordsInput.placeholder = "e.g. real estate, marketing";
-      const extra = kw ? ` for "${kw}"` : "";
-      previewQuery.textContent = `Instagram emails in "${p}"${extra}`;
-    } else {
-      keywordsLabel.textContent = "Niche / Industry";
-      keywordsInput.placeholder = "e.g. technology, marketing";
+    if (t === "profiles") {
+      keywordsLabel.textContent = "Industry / Keyword";
+      keywordsInput.placeholder = "e.g. real estate, marketing, CEO";
       const extra = kw ? ` "${kw}"` : "";
-      previewQuery.textContent = `Instagram CEO/Director/Manager in "${p}"${extra}`;
+      previewQuery.textContent = `Instagram profiles with${extra} in "${p}"`;
+    } else {
+      keywordsLabel.textContent = "Business Niche";
+      keywordsInput.placeholder = "e.g. real estate, restaurant, gym";
+      const extra = kw ? ` "${kw}"` : "";
+      previewQuery.textContent = `Instagram businesses for${extra} in "${p}"`;
     }
   }
 
   keywordsInput.addEventListener("input", updatePreview);
   placeInput.addEventListener("input", updatePreview);
   searchTypeSelect.addEventListener("change", updatePreview);
+  updatePreview(); // initial render
 
-  // Form submit
+  // ---- Form submit -----------------------------------------------------
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const keywords = keywordsInput.value.trim();
     const place = placeInput.value.trim();
     const searchType = searchTypeSelect.value;
 
-    if (!place) return;
+    if (!keywords || !place) return;
 
     currentSearchType = searchType;
     hideError();
@@ -142,7 +156,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Stop
+  // ---- Stop ------------------------------------------------------------
+
   btnStop.addEventListener("click", async () => {
     if (!currentJobId) return;
     try {
@@ -163,7 +178,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Download — fetch blob
+  // ---- Download --------------------------------------------------------
+
   btnDownload.addEventListener("click", async () => {
     if (!currentJobId) return;
     try {
@@ -203,7 +219,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // Filter
+  // ---- Filter ----------------------------------------------------------
+
   filterInput.addEventListener("input", () => {
     const term = filterInput.value.toLowerCase();
     renderLeads(
@@ -213,7 +230,8 @@ document.addEventListener("DOMContentLoaded", () => {
     );
   });
 
-  // Polling
+  // ---- Polling ---------------------------------------------------------
+
   function startPolling() {
     pollInterval = setInterval(pollStatus, 1500);
   }
@@ -278,23 +296,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // Render
-  function renderLeads(leads) {
-    if (currentSearchType === "emails") {
-      emailsTableCard.style.display = "";
-      profilesTableCard.style.display = "none";
-      renderEmails(leads);
-    } else {
-      emailsTableCard.style.display = "none";
-      profilesTableCard.style.display = "";
-      renderProfiles(leads);
-    }
-  }
+  // ---- Render (unified table) ------------------------------------------
 
-  function renderEmails(leads) {
-    emailsBody.innerHTML = "";
+  function renderLeads(leads) {
+    leadsBody.innerHTML = "";
     if (leads.length === 0) {
-      emailsBody.innerHTML = `<tr><td colspan="7" class="text-center text-muted py-4">No results found.</td></tr>`;
+      leadsBody.innerHTML = `<tr><td colspan="11" class="text-center text-muted py-4">No results found.</td></tr>`;
       return;
     }
     leads.forEach((l, idx) => {
@@ -302,56 +309,52 @@ document.addEventListener("DOMContentLoaded", () => {
         l.profile_url && l.profile_url !== "N/A"
           ? `<a href="${escapeUrl(l.profile_url)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>`
           : "N/A";
+
       const emailHtml =
         l.email && l.email !== "N/A"
-          ? `<a href="mailto:${escapeHtml(l.email.split(";")[0].trim())}">${escapeHtml(l.email)}</a>`
-          : "N/A";
+          ? `<a href="mailto:${escapeHtml(l.email.split(";")[0].trim())}">${escapeHtml(truncate(l.email, 28))}</a>`
+          : '<span class="text-muted">—</span>';
+
+      const phoneHtml =
+        l.phone && l.phone !== "N/A"
+          ? escapeHtml(l.phone)
+          : '<span class="text-muted">—</span>';
+
+      const websiteHtml =
+        l.website && l.website !== "N/A"
+          ? `<a href="${escapeUrl(l.website)}" target="_blank" rel="noopener">${escapeHtml(truncate(l.website, 25))}</a>`
+          : '<span class="text-muted">—</span>';
+
+      const categoryHtml =
+        l.category && l.category !== "N/A"
+          ? `<span class="badge bg-secondary">${escapeHtml(l.category)}</span>`
+          : '<span class="text-muted">—</span>';
+
+      const followersHtml =
+        l.followers && l.followers !== "N/A"
+          ? `<span class="badge bg-info text-dark">${escapeHtml(l.followers)}</span>`
+          : '<span class="text-muted">—</span>';
+
       const row = document.createElement("tr");
       row.innerHTML = `
         <td>${idx + 1}</td>
         <td class="fw-semibold"><span class="badge bg-danger">@${escapeHtml(l.username)}</span></td>
         <td>${escapeHtml(l.display_name)}</td>
         <td>${emailHtml}</td>
+        <td>${phoneHtml}</td>
+        <td>${websiteHtml}</td>
+        <td>${categoryHtml}</td>
+        <td>${followersHtml}</td>
         <td>${escapeHtml(l.location)}</td>
         <td>${profileLink}</td>
-        <td class="cell-truncate">${escapeHtml(l.bio_snippet)}</td>
+        <td class="cell-truncate">${escapeHtml(truncate(l.bio, 80))}</td>
       `;
-      emailsBody.appendChild(row);
+      leadsBody.appendChild(row);
     });
   }
 
-  function renderProfiles(leads) {
-    profilesBody.innerHTML = "";
-    if (leads.length === 0) {
-      profilesBody.innerHTML = `<tr><td colspan="9" class="text-center text-muted py-4">No results found.</td></tr>`;
-      return;
-    }
-    leads.forEach((l, idx) => {
-      const profileLink =
-        l.profile_url && l.profile_url !== "N/A"
-          ? `<a href="${escapeUrl(l.profile_url)}" target="_blank" rel="noopener"><i class="bi bi-box-arrow-up-right me-1"></i>View</a>`
-          : "N/A";
-      const companyUrlHtml =
-        l.company_url && l.company_url !== "N/A"
-          ? `<a href="${escapeUrl(l.company_url)}" target="_blank" rel="noopener">${escapeHtml(truncate(l.company_url, 30))}</a>`
-          : "N/A";
-      const row = document.createElement("tr");
-      row.innerHTML = `
-        <td>${idx + 1}</td>
-        <td class="fw-semibold"><span class="badge bg-danger">@${escapeHtml(l.username)}</span></td>
-        <td>${escapeHtml(l.display_name)}</td>
-        <td>${escapeHtml(l.title)}</td>
-        <td>${escapeHtml(l.company)}</td>
-        <td>${companyUrlHtml}</td>
-        <td>${escapeHtml(l.location)}</td>
-        <td>${profileLink}</td>
-        <td class="cell-truncate">${escapeHtml(l.bio_snippet)}</td>
-      `;
-      profilesBody.appendChild(row);
-    });
-  }
+  // ---- UI helpers ------------------------------------------------------
 
-  // UI helpers
   function showProgress() {
     progressSection.style.display = "";
     progressBar.style.width = "0%";
@@ -375,8 +378,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function hideResults() {
     resultsSection.style.display = "none";
-    emailsBody.innerHTML = "";
-    profilesBody.innerHTML = "";
+    leadsBody.innerHTML = "";
     allLeads = [];
     filterInput.value = "";
   }
@@ -423,6 +425,6 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function truncate(str, len) {
     if (!str) return "";
-    return str.length > len ? str.substring(0, len) + "..." : str;
+    return str.length > len ? str.substring(0, len) + "…" : str;
   }
 });

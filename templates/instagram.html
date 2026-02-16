@@ -9,8 +9,8 @@ endblock %} {% block content %}
           <i class="bi bi-instagram text-danger me-2"></i>Instagram Scraper
         </h2>
         <p class="text-center text-muted mb-4">
-          Find Instagram profiles with emails or scrape executive profiles by
-          role &amp; location
+          High-power multi-engine Instagram scraper — find profiles by keyword
+          in bio or discover businesses by niche &amp; location
         </p>
 
         <form id="instagramForm">
@@ -21,22 +21,23 @@ endblock %} {% block content %}
                 <i class="bi bi-search me-1"></i>Mode
               </label>
               <select class="form-select form-select-lg" id="searchType">
-                <option value="emails" selected>Scrape Emails</option>
-                <option value="profiles">Scrape Profiles</option>
+                <option value="profiles" selected>Profile Search</option>
+                <option value="businesses">Business Search</option>
               </select>
             </div>
 
-            <!-- Keywords (optional for emails, niche for profiles) -->
+            <!-- Keywords -->
             <div class="col-md-4">
               <label for="keywords" class="form-label fw-semibold">
                 <i class="bi bi-tag me-1"></i
-                ><span id="keywordsLabel">Keywords (optional)</span>
+                ><span id="keywordsLabel">Industry / Keyword</span>
               </label>
               <input
                 type="text"
                 class="form-control form-control-lg"
                 id="keywords"
                 placeholder="e.g. real estate, marketing"
+                required
               />
             </div>
 
@@ -126,22 +127,28 @@ endblock %} {% block content %}
 
         <!-- Live Stats Row -->
         <div class="row g-2 mt-3" id="liveStats" style="display: none">
-          <div class="col-4">
+          <div class="col-3">
             <div class="border rounded p-2 text-center">
               <div class="fw-bold text-danger" id="statQueries">0 / 0</div>
-              <small class="text-muted">Queries Done</small>
+              <small class="text-muted">Queries</small>
             </div>
           </div>
-          <div class="col-4">
+          <div class="col-3">
             <div class="border rounded p-2 text-center">
               <div class="fw-bold text-success" id="statLeads">0</div>
-              <small class="text-muted">Leads Found</small>
+              <small class="text-muted">Leads</small>
             </div>
           </div>
-          <div class="col-4">
+          <div class="col-3">
             <div class="border rounded p-2 text-center">
               <div class="fw-bold text-info" id="statParsed">—</div>
-              <small class="text-muted">Results Parsed</small>
+              <small class="text-muted">Parsed</small>
+            </div>
+          </div>
+          <div class="col-3">
+            <div class="border rounded p-2 text-center">
+              <div class="fw-bold text-warning" id="statEngines">—</div>
+              <small class="text-muted">DDG / G / B</small>
             </div>
           </div>
         </div>
@@ -178,8 +185,8 @@ endblock %} {% block content %}
       </div>
     </div>
 
-    <!-- Emails Table -->
-    <div class="card border-0 shadow" id="emailsTableCard">
+    <!-- Results Table (unified for both modes) -->
+    <div class="card border-0 shadow" id="leadsTableCard">
       <div class="table-responsive">
         <table class="table table-hover mb-0">
           <thead class="table-dark">
@@ -188,38 +195,16 @@ endblock %} {% block content %}
               <th>Username</th>
               <th>Display Name</th>
               <th>Email</th>
+              <th>Phone</th>
+              <th>Website</th>
+              <th>Category</th>
+              <th>Followers</th>
               <th>Location</th>
               <th>Profile</th>
               <th>Bio</th>
             </tr>
           </thead>
-          <tbody id="emailsBody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- Profiles Table -->
-    <div
-      class="card border-0 shadow"
-      id="profilesTableCard"
-      style="display: none"
-    >
-      <div class="table-responsive">
-        <table class="table table-hover mb-0">
-          <thead class="table-dark">
-            <tr>
-              <th>#</th>
-              <th>Username</th>
-              <th>Display Name</th>
-              <th>Title / Role</th>
-              <th>Company</th>
-              <th>Company URL</th>
-              <th>Location</th>
-              <th>Profile</th>
-              <th>Bio</th>
-            </tr>
-          </thead>
-          <tbody id="profilesBody"></tbody>
+          <tbody id="leadsBody"></tbody>
         </table>
       </div>
     </div>
