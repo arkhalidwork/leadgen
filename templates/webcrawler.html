@@ -1,213 +1,191 @@
 {% extends "base.html" %} {% block title %}LeadGen — Web Crawler{% endblock %}
-{% block content %}
-<!-- Search Form Card -->
-<div class="row justify-content-center mb-5">
-  <div class="col-lg-8">
-    <div class="card shadow-lg border-0">
-      <div class="card-body p-4 p-md-5">
-        <h2 class="card-title text-center mb-2">
-          <i class="bi bi-globe2 me-2" style="color: #ff6b35"></i>Multi-Source
-          Web Crawler
-        </h2>
-        <p class="text-center text-muted mb-4">
-          Crawl Google, Bing &amp; websites to build massive lead databases with
-          emails, phones &amp; socials
-        </p>
+{% block topbar_title %}
+<h5 class="mb-0 fw-bold">Web Crawler</h5>
+{% endblock %} {% block content %}
 
-        <form id="crawlerForm">
-          <div class="row g-3">
-            <div class="col-md-5">
-              <label for="keyword" class="form-label fw-semibold">
-                <i class="bi bi-tag me-1"></i>Keyword / Niche
-              </label>
-              <input
-                type="text"
-                class="form-control form-control-lg"
-                id="keyword"
-                placeholder="e.g. real estate, printing, plumbers"
-                required
-              />
-            </div>
-            <div class="col-md-5">
-              <label for="place" class="form-label fw-semibold">
-                <i class="bi bi-pin-map me-1"></i>Location
-              </label>
-              <input
-                type="text"
-                class="form-control form-control-lg"
-                id="place"
-                placeholder="e.g. Dubai, London, New York"
-                required
-              />
-            </div>
-            <div class="col-md-2 d-flex align-items-end">
-              <button
-                type="submit"
-                class="btn btn-lg w-100"
-                id="btnScrape"
-                style="
-                  background: linear-gradient(135deg, #ff6b35, #f7c948);
-                  color: #000;
-                  font-weight: 600;
-                "
-              >
-                <i class="bi bi-rocket-takeoff me-1"></i>Go
-              </button>
-            </div>
-          </div>
-        </form>
-
-        <div class="text-center mt-3">
-          <small class="text-muted">
-            Crawling: "<span id="previewQuery" class="fst-italic"
-              >keyword in place</span
-            >" across multiple sources
-          </small>
-        </div>
+<!-- Search Form -->
+<div class="tool-form-card">
+  <div class="tool-header mb-3">
+    <h2>
+      <i class="bi bi-globe2 me-2" style="color: #ff6b35"></i>Multi-Source Web
+      Crawler
+    </h2>
+    <p>
+      Crawl Google, Bing &amp; websites to build massive lead databases with
+      emails, phones &amp; socials
+    </p>
+  </div>
+  <form id="crawlerForm">
+    <div class="tool-form-row">
+      <div class="form-group">
+        <label for="keyword" class="form-label"
+          ><i class="bi bi-tag me-1"></i>Keyword / Niche</label
+        >
+        <input
+          type="text"
+          class="form-control form-control-lg"
+          id="keyword"
+          placeholder="e.g. real estate, printing, plumbers"
+          required
+        />
       </div>
+      <div class="form-group">
+        <label for="place" class="form-label"
+          ><i class="bi bi-pin-map me-1"></i>Location</label
+        >
+        <input
+          type="text"
+          class="form-control form-control-lg"
+          id="place"
+          placeholder="e.g. Dubai, London, New York"
+          required
+        />
+      </div>
+      <button
+        type="submit"
+        class="btn btn-lg btn-go"
+        id="btnScrape"
+        style="
+          background: linear-gradient(135deg, #ff6b35, #f7c948);
+          border: none;
+          color: #000;
+          font-weight: 700;
+        "
+      >
+        <i class="bi bi-rocket-takeoff me-1"></i>Go
+      </button>
     </div>
+  </form>
+  <div class="tool-preview">
+    <small
+      >Crawling: "<span id="previewQuery" class="fst-italic"
+        >keyword in place</span
+      >" across multiple sources</small
+    >
   </div>
 </div>
 
 <!-- Progress Section -->
-<div
-  class="row justify-content-center mb-4"
-  id="progressSection"
-  style="display: none"
->
-  <div class="col-lg-8">
-    <div class="card border-0 shadow">
-      <div class="card-body p-4">
-        <div class="d-flex justify-content-between align-items-center mb-2">
-          <h5 class="mb-0">
-            <span
-              class="spinner-border spinner-border-sm me-2"
-              id="progressSpinner"
-              style="color: #ff6b35"
-            ></span>
-            <span id="progressTitle">Crawling in progress...</span>
-          </h5>
-          <div class="d-flex align-items-center gap-3">
-            <span
-              class="badge bg-dark px-3 py-2"
-              id="elapsedTimer"
-              style="font-family: monospace; font-size: 0.95rem"
-            >
-              <i class="bi bi-clock me-1"></i>00:00:00
-            </span>
-            <button
-              class="btn btn-outline-danger btn-sm"
-              id="btnStop"
-              title="Stop Crawling"
-            >
-              <i class="bi bi-stop-circle me-1"></i>Stop
-            </button>
-          </div>
-        </div>
-        <div class="progress mb-2" style="height: 8px">
-          <div
-            class="progress-bar progress-bar-striped progress-bar-animated"
-            id="progressBar"
-            role="progressbar"
-            style="
-              width: 0%;
-              background: linear-gradient(90deg, #ff6b35, #f7c948);
-            "
-          ></div>
-        </div>
-        <small class="text-muted" id="progressMessage">Starting...</small>
-
-        <!-- Live Stats Row -->
-        <div class="row g-2 mt-3" id="liveStats" style="display: none">
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold" id="statQueries" style="color: #ff6b35">
-                0 / 0
-              </div>
-              <small class="text-muted">Queries Done</small>
-            </div>
-          </div>
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold text-success" id="statLeads">0</div>
-              <small class="text-muted">Leads Found</small>
-            </div>
-          </div>
-          <div class="col-4">
-            <div class="border rounded p-2 text-center">
-              <div class="fw-bold text-info" id="statWebsites">—</div>
-              <small class="text-muted">Websites Scanned</small>
-            </div>
-          </div>
-        </div>
+<div class="tool-progress-card" id="progressSection" style="display: none">
+  <div
+    class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
+  >
+    <h5 class="mb-0 fw-bold" style="font-size: 0.95rem">
+      <span
+        class="spinner-border spinner-border-sm me-2"
+        style="color: #ff6b35"
+        id="progressSpinner"
+      ></span>
+      <span id="progressTitle">Crawling in progress...</span>
+    </h5>
+    <div class="d-flex align-items-center gap-3">
+      <span
+        class="badge px-3 py-2"
+        id="elapsedTimer"
+        style="
+          background: var(--surface-2);
+          font-family: monospace;
+          font-size: 0.88rem;
+        "
+      >
+        <i class="bi bi-clock me-1"></i>00:00:00
+      </span>
+      <button
+        class="btn btn-outline-danger btn-sm"
+        id="btnStop"
+        title="Stop Crawling"
+      >
+        <i class="bi bi-stop-circle me-1"></i>Stop
+      </button>
+    </div>
+  </div>
+  <div class="progress mb-2">
+    <div
+      class="progress-bar progress-bar-striped progress-bar-animated"
+      id="progressBar"
+      role="progressbar"
+      style="width: 0%; background: linear-gradient(90deg, #ff6b35, #f7c948)"
+    ></div>
+  </div>
+  <small class="text-muted" id="progressMessage">Starting...</small>
+  <div class="d-flex gap-2 mt-3 flex-wrap" id="liveStats" style="display: none">
+    <div class="live-stat-box">
+      <div class="stat-val" style="color: #ff6b35" id="statQueries">0 / 0</div>
+      <div class="stat-label">Queries</div>
+    </div>
+    <div class="live-stat-box">
+      <div class="stat-val" style="color: #22c55e" id="statLeads">0</div>
+      <div class="stat-label">Leads</div>
+    </div>
+    <div class="live-stat-box">
+      <div class="stat-val" style="color: #06b6d4" id="statWebsites">
+        &mdash;
       </div>
+      <div class="stat-label">Websites</div>
     </div>
   </div>
 </div>
 
 <!-- Results Section -->
-<div
-  class="row justify-content-center"
-  id="resultsSection"
-  style="display: none"
->
-  <div class="col-lg-11">
-    <div
-      class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
-    >
-      <h4 class="mb-0">
-        <i class="bi bi-table me-2"></i>Results
-        <span class="badge ms-2" id="resultCount" style="background: #ff6b35"
-          >0</span
-        >
-      </h4>
-      <div class="d-flex gap-2">
-        <input
-          type="text"
-          class="form-control form-control-sm"
-          id="filterInput"
-          placeholder="Filter results..."
-          style="width: 200px"
-        />
-        <button class="btn btn-success btn-sm" id="btnDownload">
-          <i class="bi bi-download me-1"></i>Download CSV
-        </button>
-      </div>
+<div id="resultsSection" style="display: none">
+  <div class="tool-results-header">
+    <h4 class="mb-0 fw-bold" style="font-size: 1.05rem">
+      <i class="bi bi-table me-2"></i>Results
+      <span
+        class="badge ms-2"
+        id="resultCount"
+        style="
+          background: linear-gradient(135deg, #ff6b35, #f7c948);
+          color: #000;
+        "
+        >0</span
+      >
+    </h4>
+    <div class="d-flex gap-2 flex-wrap">
+      <input
+        type="text"
+        class="form-control form-control-sm"
+        id="filterInput"
+        placeholder="Filter results..."
+        style="width: 200px"
+      />
+      <button class="btn btn-success btn-sm" id="btnDownload">
+        <i class="bi bi-download me-1"></i>Download CSV
+      </button>
     </div>
-
-    <!-- Results Table -->
-    <div class="card border-0 shadow">
-      <div class="table-responsive">
-        <table class="table table-hover mb-0" id="resultsTable">
-          <thead class="table-dark">
-            <tr>
-              <th>#</th>
-              <th>Business Name</th>
-              <th>Phone</th>
-              <th>Email</th>
-              <th>Website</th>
-              <th>Address</th>
-              <th>Source</th>
-              <th>Socials</th>
-              <th>Description</th>
-            </tr>
-          </thead>
-          <tbody id="resultsBody"></tbody>
-        </table>
-      </div>
+  </div>
+  <div class="tool-results-card">
+    <div class="table-responsive">
+      <table class="table table-hover mb-0" id="resultsTable">
+        <thead class="table-dark">
+          <tr>
+            <th>#</th>
+            <th>Business Name</th>
+            <th>Phone</th>
+            <th>Email</th>
+            <th>Website</th>
+            <th>Address</th>
+            <th>Source</th>
+            <th>Socials</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody id="resultsBody"></tbody>
+      </table>
     </div>
   </div>
 </div>
 
-<!-- Error Alert -->
-<div class="row justify-content-center" id="errorSection" style="display: none">
-  <div class="col-lg-8">
-    <div class="alert alert-danger d-flex align-items-center" role="alert">
-      <i class="bi bi-exclamation-triangle-fill me-2 fs-4"></i>
-      <div id="errorMessage"></div>
-    </div>
+<div id="errorSection" style="display: none">
+  <div class="alert alert-danger d-flex align-items-center" role="alert">
+    <i
+      class="bi bi-exclamation-triangle-fill me-2"
+      style="font-size: 1.2rem"
+    ></i>
+    <div id="errorMessage"></div>
   </div>
 </div>
+
 {% endblock %} {% block extra_js %}
 <script src="{{ url_for('static', filename='js/webcrawler.js') }}"></script>
 {% endblock %}

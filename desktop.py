@@ -32,6 +32,9 @@ else:
 os.makedirs(output_dir, exist_ok=True)
 os.environ["LEADGEN_OUTPUT_DIR"] = output_dir
 
+# Desktop mode — skip landing page, go straight to login/dashboard
+os.environ["LEADGEN_DESKTOP"] = "1"
+
 from app import app
 
 

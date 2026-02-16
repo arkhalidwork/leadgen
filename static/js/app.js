@@ -60,7 +60,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Update live stats from server response
   function updateLiveStats(data) {
     if (!data.area_stats) return;
-    liveStats.style.display = "";
+    liveStats.style.display = "flex";
     const as = data.area_stats;
 
     if (as.total_areas > 0) {

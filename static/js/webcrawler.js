@@ -66,7 +66,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function updateLiveStats(data) {
     const liveStats = document.getElementById("liveStats");
     if (!data.scrape_stats) return;
-    if (liveStats) liveStats.style.display = "";
+    if (liveStats) liveStats.style.display = "flex";
     const stats = data.scrape_stats;
     const statQueries = document.getElementById("statQueries");
     const statLeads = document.getElementById("statLeads");

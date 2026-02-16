@@ -33,6 +33,9 @@ app.secret_key = os.environ.get("LEADGEN_SECRET_KEY", "leadgen-secret-change-me-
 app.permanent_session_lifetime = timedelta(days=30)
 CORS(app)
 
+# Desktop mode flag - skip landing page when running via pywebview
+IS_DESKTOP = os.environ.get("LEADGEN_DESKTOP", "").lower() in ("1", "true", "yes")
+
 # Store active scraping jobs and their results
 scraping_jobs = {}          # Google Maps jobs
 linkedin_jobs = {}          # LinkedIn jobs
@@ -41,6 +44,21 @@ webcrawler_jobs = {}        # Web Crawler jobs
 OUTPUT_DIR = os.environ.get("LEADGEN_OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "output"))
 DB_PATH = os.environ.get("LEADGEN_DB_PATH", os.path.join(os.path.dirname(__file__), "leadgen.db"))
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Maximum number of completed jobs to keep in memory per store
+_MAX_FINISHED_JOBS = 20
+
+
+def _cleanup_jobs(store: dict, max_keep: int = _MAX_FINISHED_JOBS):
+    """Remove oldest finished jobs when store exceeds max_keep completed entries."""
+    finished = [(jid, j) for jid, j in store.items()
+                if getattr(j, "status", "") in ("completed", "failed", "stopped")]
+    if len(finished) <= max_keep:
+        return
+    # Sort by start time, oldest first
+    finished.sort(key=lambda x: getattr(x[1], "started_at", datetime.min))
+    for jid, _ in finished[: len(finished) - max_keep]:
+        store.pop(jid, None)
 
 
 # ============================================================
@@ -103,6 +121,28 @@ def init_db():
             csv_path    TEXT DEFAULT '',
             FOREIGN KEY (user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS leads (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            scrape_id   INTEGER NOT NULL,
+            tool        TEXT NOT NULL,
+            keyword     TEXT DEFAULT '',
+            location    TEXT DEFAULT '',
+            title       TEXT DEFAULT '',
+            email       TEXT DEFAULT '',
+            phone       TEXT DEFAULT '',
+            website     TEXT DEFAULT '',
+            quality     TEXT DEFAULT 'weak',
+            data        TEXT DEFAULT '{}',
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (scrape_id) REFERENCES scrape_history(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_leads_user ON leads(user_id);
+        CREATE INDEX IF NOT EXISTS idx_leads_scrape ON leads(scrape_id);
+        CREATE INDEX IF NOT EXISTS idx_leads_tool ON leads(user_id, tool);
+        CREATE INDEX IF NOT EXISTS idx_leads_keyword ON leads(user_id, keyword);
+        CREATE INDEX IF NOT EXISTS idx_leads_location ON leads(user_id, location);
     """)
     # Seed a demo license key if none exist
     cur = db.execute("SELECT COUNT(*) FROM license_keys")
@@ -278,10 +318,74 @@ def _record_history_on_complete(job, tool: str):
              csv_path, job.id),
         )
         db.commit()
+
+        # Persist individual leads to the leads table
+        _persist_leads_to_db(db, job, tool)
+
         db.close()
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"History record error: {e}")
+
+
+def _get_lead_title(lead: dict, tool: str) -> str:
+    """Extract a display title from a lead dict based on tool type."""
+    if tool == "gmaps":
+        return lead.get("business_name", "") or ""
+    elif tool == "linkedin":
+        return lead.get("name", "") or lead.get("company_name", "") or ""
+    elif tool == "instagram":
+        return lead.get("display_name", "") or lead.get("username", "") or ""
+    elif tool == "webcrawler":
+        return lead.get("business_name", "") or ""
+    return ""
+
+
+def _persist_leads_to_db(db, job, tool: str):
+    """Insert individual lead rows into the leads table (called from bg thread)."""
+    try:
+        # Look up scrape_history row to get user_id and scrape_id
+        row = db.execute(
+            "SELECT id, user_id, keyword, location FROM scrape_history WHERE job_id=?",
+            (job.id,),
+        ).fetchone()
+        if not row:
+            return
+        scrape_id = row["id"]
+        user_id = row["user_id"]
+        keyword = row["keyword"]
+        location = row["location"]
+
+        leads_with_quality = list(job.leads)
+        if leads_with_quality and "_quality" not in leads_with_quality[0]:
+            score_leads(leads_with_quality, tool)
+
+        insert_data = []
+        for lead in leads_with_quality:
+            title = _get_lead_title(lead, tool)
+            email = lead.get("email", "") or ""
+            phone = lead.get("phone", "") or ""
+            website = lead.get("website", "") or lead.get("profile_url", "") or ""
+            quality = lead.get("_quality", "weak")
+            # Store the full lead as JSON (exclude internal _quality key)
+            lead_data = {k: v for k, v in lead.items() if not k.startswith("_")}
+            insert_data.append((
+                user_id, scrape_id, tool, keyword, location,
+                title, email, phone, website, quality,
+                json.dumps(lead_data, default=str),
+            ))
+
+        if insert_data:
+            db.executemany(
+                "INSERT INTO leads (user_id, scrape_id, tool, keyword, location, "
+                "title, email, phone, website, quality, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                insert_data,
+            )
+            db.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Lead persist error: {e}")
 
 
 def _insert_history_direct(user_id: int, job_id: str, tool: str,
@@ -544,7 +648,6 @@ def run_scraping_job(job: ScrapingJob):
         job.progress = 100
         job.message = f"Done! Found {len(cleaned)} leads."
         _record_history_on_complete(job, "gmaps")
-        _record_history_on_complete(job, "gmaps")
 
     except Exception as e:
         # On error, still save partial results
@@ -558,6 +661,13 @@ def run_scraping_job(job: ScrapingJob):
             job.error = str(e)
             job.message = f"Error: {str(e)}. Saved {len(job.leads)} partial leads."
         _record_history_on_complete(job, "gmaps")
+    finally:
+        # Release scraper resources and prune old jobs
+        if job.scraper:
+            try: job.scraper.close()
+            except Exception: pass
+            job.scraper = None
+        _cleanup_jobs(scraping_jobs)
 
 
 def run_linkedin_job(job: LinkedInJob):
@@ -596,6 +706,12 @@ def run_linkedin_job(job: LinkedInJob):
             job.error = str(e)
             job.message = f"Error: {str(e)}. Saved {len(job.leads)} partial leads."
         _record_history_on_complete(job, "linkedin")
+    finally:
+        if job.scraper:
+            try: job.scraper.close()
+            except Exception: pass
+            job.scraper = None
+        _cleanup_jobs(linkedin_jobs)
 
 
 def run_instagram_job(job: InstagramJob):
@@ -636,6 +752,12 @@ def run_instagram_job(job: InstagramJob):
             job.error = str(e)
             job.message = f"Error: {str(e)}. Saved {len(job.leads)} partial leads."
         _record_history_on_complete(job, "instagram")
+    finally:
+        if job.scraper:
+            try: job.scraper.close()
+            except Exception: pass
+            job.scraper = None
+        _cleanup_jobs(instagram_jobs)
 
 
 def run_webcrawler_job(job: WebCrawlerJob):
@@ -674,6 +796,12 @@ def run_webcrawler_job(job: WebCrawlerJob):
             job.error = str(e)
             job.message = f"Error: {str(e)}. Saved {len(job.leads)} partial leads."
         _record_history_on_complete(job, "webcrawler")
+    finally:
+        if job.scraper:
+            try: job.scraper.close()
+            except Exception: pass
+            job.scraper = None
+        _cleanup_jobs(webcrawler_jobs)
 
 
 # ============================================================
@@ -958,9 +1086,19 @@ def save_gmaps_csv(leads: list[dict], filepath: str):
 # ============================================================
 
 @app.route("/")
+def landing_page():
+    """Public landing page."""
+    if IS_DESKTOP:
+        return redirect(url_for("login_page"))
+    if session.get("user_id"):
+        return redirect(url_for("dashboard"))
+    return render_template("landing.html", current_year=datetime.now().year)
+
+
+@app.route("/dashboard")
 @login_required
 def dashboard():
-    """Dashboard landing page."""
+    """Dashboard page."""
     user = current_user()
     if user and not user["is_active"]:
         return redirect(url_for("activate_page"))
@@ -1386,6 +1524,342 @@ def webcrawler_stop(job_id):
     job.status = "stopped"
     job.message = f"Stopped by user. Saved {len(job.leads)} leads."
     return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
+
+
+# ============================================================
+# Lead Database API
+# ============================================================
+
+@app.route("/api/leads")
+@login_required
+def api_leads():
+    """Query leads with filtering + pagination."""
+    uid = session["user_id"]
+    db = get_db()
+
+    # Filters
+    tool = request.args.get("tool", "").strip()
+    keyword = request.args.get("keyword", "").strip()
+    location = request.args.get("location", "").strip()
+    quality = request.args.get("quality", "").strip()
+    search = request.args.get("search", "").strip()
+    scrape_id = request.args.get("scrape_id", "", type=str).strip()
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    per_page = min(per_page, 200)
+    offset = (page - 1) * per_page
+
+    where = ["user_id = ?"]
+    params = [uid]
+
+    if tool:
+        where.append("tool = ?")
+        params.append(tool)
+    if keyword:
+        where.append("keyword LIKE ?")
+        params.append(f"%{keyword}%")
+    if location:
+        where.append("location LIKE ?")
+        params.append(f"%{location}%")
+    if quality:
+        where.append("quality = ?")
+        params.append(quality)
+    if scrape_id:
+        where.append("scrape_id = ?")
+        params.append(int(scrape_id))
+    if search:
+        where.append("(title LIKE ? OR email LIKE ? OR phone LIKE ? OR website LIKE ?)")
+        s = f"%{search}%"
+        params.extend([s, s, s, s])
+
+    where_clause = " AND ".join(where)
+
+    total = db.execute(
+        f"SELECT COUNT(*) FROM leads WHERE {where_clause}", params
+    ).fetchone()[0]
+
+    rows = db.execute(
+        f"SELECT * FROM leads WHERE {where_clause} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        params + [per_page, offset],
+    ).fetchall()
+
+    leads = []
+    for r in rows:
+        leads.append({
+            "id": r["id"],
+            "scrape_id": r["scrape_id"],
+            "tool": r["tool"],
+            "keyword": r["keyword"],
+            "location": r["location"],
+            "title": r["title"],
+            "email": r["email"],
+            "phone": r["phone"],
+            "website": r["website"],
+            "quality": r["quality"],
+            "data": json.loads(r["data"]) if r["data"] else {},
+            "created_at": r["created_at"],
+        })
+
+    return jsonify({
+        "leads": leads,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "pages": (total + per_page - 1) // per_page,
+    })
+
+
+@app.route("/api/leads/filters")
+@login_required
+def api_leads_filters():
+    """Return distinct filter values for the current user's leads."""
+    uid = session["user_id"]
+    db = get_db()
+
+    tools = [r[0] for r in db.execute(
+        "SELECT DISTINCT tool FROM leads WHERE user_id=? ORDER BY tool", (uid,)
+    ).fetchall()]
+    keywords = [r[0] for r in db.execute(
+        "SELECT DISTINCT keyword FROM leads WHERE user_id=? AND keyword!='' ORDER BY keyword", (uid,)
+    ).fetchall()]
+    locations = [r[0] for r in db.execute(
+        "SELECT DISTINCT location FROM leads WHERE user_id=? AND location!='' ORDER BY location", (uid,)
+    ).fetchall()]
+
+    return jsonify({"tools": tools, "keywords": keywords, "locations": locations})
+
+
+@app.route("/api/leads/export")
+@login_required
+def api_leads_export():
+    """Export filtered leads as CSV."""
+    uid = session["user_id"]
+    db = get_db()
+
+    tool = request.args.get("tool", "").strip()
+    keyword = request.args.get("keyword", "").strip()
+    location = request.args.get("location", "").strip()
+    quality = request.args.get("quality", "").strip()
+    scrape_id = request.args.get("scrape_id", "").strip()
+    search = request.args.get("search", "").strip()
+
+    where = ["user_id = ?"]
+    params = [uid]
+
+    if tool:
+        where.append("tool = ?")
+        params.append(tool)
+    if keyword:
+        where.append("keyword LIKE ?")
+        params.append(f"%{keyword}%")
+    if location:
+        where.append("location LIKE ?")
+        params.append(f"%{location}%")
+    if quality:
+        where.append("quality = ?")
+        params.append(quality)
+    if scrape_id:
+        where.append("scrape_id = ?")
+        params.append(int(scrape_id))
+    if search:
+        where.append("(title LIKE ? OR email LIKE ? OR phone LIKE ? OR website LIKE ?)")
+        s = f"%{search}%"
+        params.extend([s, s, s, s])
+
+    where_clause = " AND ".join(where)
+
+    rows = db.execute(
+        f"SELECT * FROM leads WHERE {where_clause} ORDER BY created_at DESC",
+        params,
+    ).fetchall()
+
+    if not rows:
+        return jsonify({"error": "No leads to export."}), 404
+
+    output = io.StringIO()
+    fieldnames = ["Title", "Email", "Phone", "Website", "Tool", "Keyword",
+                  "Location", "Quality", "Date"]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in rows:
+        writer.writerow({
+            "Title": r["title"],
+            "Email": r["email"],
+            "Phone": r["phone"],
+            "Website": r["website"],
+            "Tool": r["tool"],
+            "Keyword": r["keyword"],
+            "Location": r["location"],
+            "Quality": r["quality"],
+            "Date": r["created_at"],
+        })
+
+    output.seek(0)
+    filename = f"leadgen_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(
+        output.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/leads/<int:lead_id>", methods=["DELETE"])
+@login_required
+def api_lead_delete(lead_id):
+    """Delete a single lead."""
+    uid = session["user_id"]
+    db = get_db()
+    result = db.execute("DELETE FROM leads WHERE id=? AND user_id=?", (lead_id, uid))
+    db.commit()
+    if result.rowcount == 0:
+        return jsonify({"error": "Lead not found."}), 404
+    return jsonify({"message": "Lead deleted."})
+
+
+@app.route("/api/leads/bulk-delete", methods=["POST"])
+@login_required
+def api_leads_bulk_delete():
+    """Delete multiple leads by ID."""
+    uid = session["user_id"]
+    data = request.get_json()
+    ids = data.get("ids", [])
+    if not ids:
+        return jsonify({"error": "No IDs provided."}), 400
+
+    db = get_db()
+    placeholders = ",".join("?" * len(ids))
+    db.execute(
+        f"DELETE FROM leads WHERE user_id=? AND id IN ({placeholders})",
+        [uid] + list(ids),
+    )
+    db.commit()
+    return jsonify({"message": f"Deleted {len(ids)} leads."})
+
+
+@app.route("/api/leads/stats")
+@login_required
+def api_leads_stats():
+    """Quick stats for the leads database page."""
+    uid = session["user_id"]
+    db = get_db()
+
+    total = db.execute("SELECT COUNT(*) FROM leads WHERE user_id=?", (uid,)).fetchone()[0]
+    with_email = db.execute(
+        "SELECT COUNT(*) FROM leads WHERE user_id=? AND email!='' AND email IS NOT NULL", (uid,)
+    ).fetchone()[0]
+    with_phone = db.execute(
+        "SELECT COUNT(*) FROM leads WHERE user_id=? AND phone!='' AND phone IS NOT NULL", (uid,)
+    ).fetchone()[0]
+
+    quality_rows = db.execute(
+        "SELECT quality, COUNT(*) as cnt FROM leads WHERE user_id=? GROUP BY quality", (uid,)
+    ).fetchall()
+    quality = {r["quality"]: r["cnt"] for r in quality_rows}
+
+    tool_rows = db.execute(
+        "SELECT tool, COUNT(*) as cnt FROM leads WHERE user_id=? GROUP BY tool", (uid,)
+    ).fetchall()
+    by_tool = {r["tool"]: r["cnt"] for r in tool_rows}
+
+    return jsonify({
+        "total": total,
+        "with_email": with_email,
+        "with_phone": with_phone,
+        "quality": quality,
+        "by_tool": by_tool,
+    })
+
+
+# ============================================================
+# Account Settings API
+# ============================================================
+
+@app.route("/api/account/profile", methods=["PUT"])
+@login_required
+def api_account_profile():
+    """Update user profile (name, email)."""
+    uid = session["user_id"]
+    data = request.get_json()
+    full_name = (data.get("full_name") or "").strip()
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return jsonify({"error": "Email is required."}), 400
+
+    db = get_db()
+    # Check if email is taken by another user
+    existing = db.execute(
+        "SELECT id FROM users WHERE email=? AND id!=?", (email, uid)
+    ).fetchone()
+    if existing:
+        return jsonify({"error": "That email is already in use."}), 409
+
+    db.execute(
+        "UPDATE users SET full_name=?, email=? WHERE id=?",
+        (full_name, email, uid),
+    )
+    db.commit()
+    session["email"] = email
+    return jsonify({"message": "Profile updated."})
+
+
+@app.route("/api/account/password", methods=["PUT"])
+@login_required
+def api_account_password():
+    """Change password."""
+    uid = session["user_id"]
+    data = request.get_json()
+    current_pw = (data.get("current_password") or "").strip()
+    new_pw = (data.get("new_password") or "").strip()
+
+    if not current_pw or not new_pw:
+        return jsonify({"error": "Both current and new password are required."}), 400
+    if len(new_pw) < 6:
+        return jsonify({"error": "New password must be at least 6 characters."}), 400
+
+    db = get_db()
+    user = db.execute("SELECT password FROM users WHERE id=?", (uid,)).fetchone()
+    if not user or user["password"] != _hash_password(current_pw):
+        return jsonify({"error": "Current password is incorrect."}), 401
+
+    db.execute("UPDATE users SET password=? WHERE id=?", (_hash_password(new_pw), uid))
+    db.commit()
+    return jsonify({"message": "Password changed successfully."})
+
+
+@app.route("/api/account/delete", methods=["DELETE"])
+@login_required
+def api_account_delete():
+    """Delete user account and all associated data."""
+    uid = session["user_id"]
+    db = get_db()
+    db.execute("DELETE FROM leads WHERE user_id=?", (uid,))
+    db.execute("DELETE FROM scrape_history WHERE user_id=?", (uid,))
+    db.execute("DELETE FROM users WHERE id=?", (uid,))
+    db.commit()
+    session.clear()
+    return jsonify({"message": "Account deleted."})
+
+
+# ============================================================
+# Database & Settings page routes
+# ============================================================
+
+@app.route("/database")
+@login_required
+def database_page():
+    """Lead database page."""
+    user = current_user()
+    if user and not user["is_active"]:
+        return redirect(url_for("activate_page"))
+    scrape_id = request.args.get("scrape_id", "")
+    return render_template("database.html", active_page="database", scrape_id=scrape_id)
+
+
+@app.route("/settings")
+@login_required
+def settings_page():
+    """Account settings page."""
+    return render_template("settings.html", active_page="settings")
 
 
 if __name__ == "__main__":

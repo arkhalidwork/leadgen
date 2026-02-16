@@ -1,6 +1,6 @@
 {% extends "base.html" %} {% block title %}LeadGen — Dashboard{% endblock %} {%
 block topbar_title %}
-<h5 class="mb-0 fw-semibold">Dashboard</h5>
+<h5 class="mb-0 fw-bold">Dashboard</h5>
 {% endblock %} {% block extra_css %}
 <style>
   .quality-dot {
@@ -8,20 +8,39 @@ block topbar_title %}
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    margin-right: 6px;
+    margin-right: 8px;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.2);
   }
   .quality-dot-strong {
-    background: #28a745;
+    background: #22c55e;
   }
   .quality-dot-medium {
-    background: #ffc107;
+    background: #eab308;
   }
   .quality-dot-weak {
-    background: #dc3545;
+    background: #ef4444;
   }
   .quality-bar {
-    height: 8px;
-    border-radius: 4px;
+    height: 6px;
+    border-radius: 9999px;
+  }
+  .chart-wrap {
+    position: relative;
+  }
+  .stat-card-accent {
+    border-top: 3px solid transparent;
+  }
+  .stat-card-accent.accent-blue {
+    border-top-color: #4f8cff;
+  }
+  .stat-card-accent.accent-green {
+    border-top-color: #22c55e;
+  }
+  .stat-card-accent.accent-yellow {
+    border-top-color: #eab308;
+  }
+  .stat-card-accent.accent-red {
+    border-top-color: #ef4444;
   }
 </style>
 {% endblock %} {% block content %}
@@ -29,53 +48,71 @@ block topbar_title %}
 <!-- Stats Row -->
 <div class="row g-3 mb-4">
   <div class="col-6 col-md-3">
-    <div class="card stat-card border-0 p-3">
+    <div class="stat-card stat-card-accent accent-blue p-3">
       <div class="d-flex align-items-center gap-3">
-        <div class="stat-icon bg-primary-subtle text-primary">
+        <div
+          class="stat-icon"
+          style="background: rgba(79, 140, 255, 0.12); color: #4f8cff"
+        >
           <i class="bi bi-people-fill"></i>
         </div>
         <div>
-          <div class="stat-number" id="statTotalLeads">—</div>
-          <div class="text-muted small">Total Leads</div>
+          <div class="stat-number" id="statTotalLeads">&mdash;</div>
+          <div class="text-muted small fw-medium">Total Leads</div>
         </div>
       </div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card stat-card border-0 p-3">
+    <div class="stat-card stat-card-accent accent-green p-3">
       <div class="d-flex align-items-center gap-3">
-        <div class="stat-icon bg-success-subtle text-success">
+        <div
+          class="stat-icon"
+          style="background: rgba(34, 197, 94, 0.12); color: #22c55e"
+        >
           <i class="bi bi-check-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number text-success" id="statStrong">—</div>
-          <div class="text-muted small">Strong Leads</div>
+          <div class="stat-number" style="color: #22c55e" id="statStrong">
+            &mdash;
+          </div>
+          <div class="text-muted small fw-medium">Strong</div>
         </div>
       </div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card stat-card border-0 p-3">
+    <div class="stat-card stat-card-accent accent-yellow p-3">
       <div class="d-flex align-items-center gap-3">
-        <div class="stat-icon bg-warning-subtle text-warning">
+        <div
+          class="stat-icon"
+          style="background: rgba(234, 179, 8, 0.12); color: #eab308"
+        >
           <i class="bi bi-exclamation-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number text-warning" id="statMedium">—</div>
-          <div class="text-muted small">Medium Leads</div>
+          <div class="stat-number" style="color: #eab308" id="statMedium">
+            &mdash;
+          </div>
+          <div class="text-muted small fw-medium">Medium</div>
         </div>
       </div>
     </div>
   </div>
   <div class="col-6 col-md-3">
-    <div class="card stat-card border-0 p-3">
+    <div class="stat-card stat-card-accent accent-red p-3">
       <div class="d-flex align-items-center gap-3">
-        <div class="stat-icon bg-danger-subtle text-danger">
+        <div
+          class="stat-icon"
+          style="background: rgba(239, 68, 68, 0.12); color: #ef4444"
+        >
           <i class="bi bi-x-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number text-danger" id="statWeak">—</div>
-          <div class="text-muted small">Weak Leads</div>
+          <div class="stat-number" style="color: #ef4444" id="statWeak">
+            &mdash;
+          </div>
+          <div class="text-muted small fw-medium">Weak</div>
         </div>
       </div>
     </div>
@@ -86,30 +123,33 @@ block topbar_title %}
 <div class="row g-4 mb-4">
   <!-- Quality Breakdown -->
   <div class="col-md-5 col-lg-4">
-    <div class="card border-0 h-100">
-      <div class="card-body">
-        <h6 class="fw-semibold mb-3">
-          <i class="bi bi-pie-chart-fill text-primary me-2"></i>Lead Quality
+    <div class="card h-100">
+      <div class="card-body p-4">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-pie-chart-fill me-2" style="color: #4f8cff"></i>Lead
+          Quality
         </h6>
-        <div class="d-flex justify-content-center mb-3">
-          <canvas id="qualityChart" width="200" height="200"></canvas>
+        <div class="d-flex justify-content-center mb-3 chart-wrap">
+          <canvas id="qualityChart" width="190" height="190"></canvas>
         </div>
-        <div class="d-flex flex-column gap-2">
-          <div class="d-flex align-items-center justify-content-between">
-            <span
+        <div class="d-flex flex-column gap-2 mt-2">
+          <div class="d-flex align-items-center justify-content-between py-1">
+            <span class="small"
               ><span class="quality-dot quality-dot-strong"></span>Strong</span
             >
-            <span class="fw-semibold" id="qualityStrongPct">0%</span>
+            <span class="fw-bold small" id="qualityStrongPct">0%</span>
           </div>
-          <div class="d-flex align-items-center justify-content-between">
-            <span
+          <div class="d-flex align-items-center justify-content-between py-1">
+            <span class="small"
               ><span class="quality-dot quality-dot-medium"></span>Medium</span
             >
-            <span class="fw-semibold" id="qualityMediumPct">0%</span>
+            <span class="fw-bold small" id="qualityMediumPct">0%</span>
           </div>
-          <div class="d-flex align-items-center justify-content-between">
-            <span><span class="quality-dot quality-dot-weak"></span>Weak</span>
-            <span class="fw-semibold" id="qualityWeakPct">0%</span>
+          <div class="d-flex align-items-center justify-content-between py-1">
+            <span class="small"
+              ><span class="quality-dot quality-dot-weak"></span>Weak</span
+            >
+            <span class="fw-bold small" id="qualityWeakPct">0%</span>
           </div>
         </div>
       </div>
@@ -118,12 +158,15 @@ block topbar_title %}
 
   <!-- 7-Day Trend -->
   <div class="col-md-7 col-lg-8">
-    <div class="card border-0 h-100">
-      <div class="card-body">
-        <h6 class="fw-semibold mb-3">
-          <i class="bi bi-graph-up text-primary me-2"></i>Leads (Last 7 Days)
+    <div class="card h-100">
+      <div class="card-body p-4">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-graph-up me-2" style="color: #4f8cff"></i>Leads
+          &mdash; Last 7 Days
         </h6>
-        <canvas id="trendChart" height="200"></canvas>
+        <div class="chart-wrap" style="height: 210px">
+          <canvas id="trendChart"></canvas>
+        </div>
       </div>
     </div>
   </div>
@@ -133,10 +176,11 @@ block topbar_title %}
 <div class="row g-4 mb-4">
   <!-- Per-Tool Stats -->
   <div class="col-md-6">
-    <div class="card border-0 h-100">
-      <div class="card-body">
-        <h6 class="fw-semibold mb-3">
-          <i class="bi bi-bar-chart-fill text-primary me-2"></i>By Tool
+    <div class="card h-100">
+      <div class="card-body p-4">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-bar-chart-fill me-2" style="color: #4f8cff"></i>By
+          Tool
         </h6>
         <div class="table-responsive">
           <table class="table table-dark table-hover mb-0">
@@ -149,7 +193,9 @@ block topbar_title %}
             </thead>
             <tbody id="toolStatsBody">
               <tr>
-                <td colspan="3" class="text-center text-muted">Loading...</td>
+                <td colspan="3" class="text-center text-muted py-3">
+                  Loading...
+                </td>
               </tr>
             </tbody>
           </table>
@@ -160,11 +206,11 @@ block topbar_title %}
 
   <!-- Quick Launch -->
   <div class="col-md-6">
-    <div class="card border-0 h-100">
-      <div class="card-body">
-        <h6 class="fw-semibold mb-3">
-          <i class="bi bi-rocket-takeoff-fill text-primary me-2"></i>Quick
-          Launch
+    <div class="card h-100">
+      <div class="card-body p-4">
+        <h6 class="fw-bold mb-3">
+          <i class="bi bi-rocket-takeoff-fill me-2" style="color: #4f8cff"></i
+          >Quick Launch
         </h6>
         <div class="d-flex flex-column gap-2">
           <a href="/tools/google-maps" class="quick-launch-btn">
@@ -175,12 +221,12 @@ block topbar_title %}
               <i class="bi bi-geo-alt-fill"></i>
             </div>
             <div class="flex-grow-1">
-              <div class="fw-semibold">Google Maps</div>
-              <div class="text-muted small">
+              <div class="fw-bold small">Google Maps</div>
+              <div class="text-muted" style="font-size: 0.74rem">
                 Business contacts, phones, emails
               </div>
             </div>
-            <i class="bi bi-chevron-right text-muted"></i>
+            <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/linkedin" class="quick-launch-btn">
             <div
@@ -190,10 +236,12 @@ block topbar_title %}
               <i class="bi bi-linkedin"></i>
             </div>
             <div class="flex-grow-1">
-              <div class="fw-semibold">LinkedIn</div>
-              <div class="text-muted small">Profiles & companies</div>
+              <div class="fw-bold small">LinkedIn</div>
+              <div class="text-muted" style="font-size: 0.74rem">
+                Profiles &amp; companies
+              </div>
             </div>
-            <i class="bi bi-chevron-right text-muted"></i>
+            <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/instagram" class="quick-launch-btn">
             <div
@@ -203,10 +251,12 @@ block topbar_title %}
               <i class="bi bi-instagram"></i>
             </div>
             <div class="flex-grow-1">
-              <div class="fw-semibold">Instagram</div>
-              <div class="text-muted small">Emails & social profiles</div>
+              <div class="fw-bold small">Instagram</div>
+              <div class="text-muted" style="font-size: 0.74rem">
+                Emails &amp; social profiles
+              </div>
             </div>
-            <i class="bi bi-chevron-right text-muted"></i>
+            <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/web-crawler" class="quick-launch-btn">
             <div
@@ -216,10 +266,12 @@ block topbar_title %}
               <i class="bi bi-globe2"></i>
             </div>
             <div class="flex-grow-1">
-              <div class="fw-semibold">Web Crawler</div>
-              <div class="text-muted small">Deep-scrape websites for leads</div>
+              <div class="fw-bold small">Web Crawler</div>
+              <div class="text-muted" style="font-size: 0.74rem">
+                Deep-scrape websites for leads
+              </div>
             </div>
-            <i class="bi bi-chevron-right text-muted"></i>
+            <i class="bi bi-chevron-right text-muted small"></i>
           </a>
         </div>
       </div>
@@ -228,13 +280,17 @@ block topbar_title %}
 </div>
 
 <!-- Scrape History -->
-<div class="card border-0 mb-4">
-  <div class="card-body">
+<div class="card mb-4">
+  <div class="card-body p-4">
     <div class="d-flex align-items-center justify-content-between mb-3">
-      <h6 class="fw-semibold mb-0">
-        <i class="bi bi-clock-history text-primary me-2"></i>Recent Scrapes
+      <h6 class="fw-bold mb-0">
+        <i class="bi bi-clock-history me-2" style="color: #4f8cff"></i>Recent
+        Scrapes
       </h6>
-      <span class="text-muted small" id="historyCount"></span>
+      <span
+        class="badge bg-primary-subtle text-primary-emphasis"
+        id="historyCount"
+      ></span>
     </div>
     <div class="table-responsive">
       <table class="table table-dark table-hover mb-0">

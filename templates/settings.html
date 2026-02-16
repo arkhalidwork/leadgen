@@ -1,0 +1,408 @@
+{% extends "base.html" %} {% block title %}LeadGen — Settings{% endblock %} {%
+block topbar_title %}
+<h5 class="mb-0 fw-bold">Account Settings</h5>
+{% endblock %} {% block extra_css %}
+<style>
+  .settings-card {
+    max-width: 640px;
+  }
+  .settings-card .card-body {
+    padding: 2rem;
+  }
+  .settings-section {
+    margin-bottom: 2rem;
+  }
+  .settings-section:last-child {
+    margin-bottom: 0;
+  }
+  .settings-section h6 {
+    font-weight: 700;
+    margin-bottom: 1rem;
+  }
+  .settings-section .form-control {
+    background: var(--surface-2);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+  }
+  .settings-section .form-control:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+  .settings-divider {
+    border-top: 1px solid var(--border-color);
+    margin: 1.5rem 0;
+  }
+  .avatar-large {
+    width: 72px;
+    height: 72px;
+    border-radius: 50%;
+    background: var(--gradient-primary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.8rem;
+    color: #fff;
+  }
+  .plan-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e;
+  }
+  .plan-badge.inactive {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
+  .danger-zone {
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    border-radius: 12px;
+    padding: 1.25rem;
+    background: rgba(239, 68, 68, 0.04);
+  }
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 9999;
+  }
+</style>
+{% endblock %} {% block content %}
+
+<div class="row justify-content-center">
+  <div class="col-lg-8">
+    <!-- Profile Card -->
+    <div class="card settings-card mb-4">
+      <div class="card-body">
+        <div class="d-flex align-items-center gap-3 mb-4">
+          <div class="avatar-large" id="settingsAvatar">
+            <i class="bi bi-person-fill"></i>
+          </div>
+          <div>
+            <h5 class="fw-bold mb-1" id="settingsDisplayName">User</h5>
+            <div class="text-muted small" id="settingsDisplayEmail">—</div>
+            <div class="mt-1">
+              <span class="plan-badge" id="settingsPlanBadge">
+                <i class="bi bi-patch-check-fill"></i> Active
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h6>
+            <i class="bi bi-person-gear me-2" style="color: var(--accent)"></i
+            >Profile Information
+          </h6>
+          <form id="profileForm">
+            <div class="mb-3">
+              <label class="form-label small text-muted">Full Name</label>
+              <input
+                type="text"
+                class="form-control"
+                id="settingsName"
+                placeholder="Your name"
+              />
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">Email Address</label>
+              <input
+                type="email"
+                class="form-control"
+                id="settingsEmail"
+                placeholder="you@example.com"
+              />
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">
+              <i class="bi bi-check-lg me-1"></i>Save Changes
+            </button>
+            <span class="ms-2 small text-success d-none" id="profileSuccess">
+              <i class="bi bi-check-circle me-1"></i>Saved
+            </span>
+            <span
+              class="ms-2 small text-danger d-none"
+              id="profileError"
+            ></span>
+          </form>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-section">
+          <h6>
+            <i class="bi bi-key-fill me-2" style="color: var(--accent)"></i
+            >Change Password
+          </h6>
+          <form id="passwordForm">
+            <div class="mb-3">
+              <label class="form-label small text-muted"
+                >Current Password</label
+              >
+              <input
+                type="password"
+                class="form-control"
+                id="currentPassword"
+                placeholder="Enter current password"
+              />
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted">New Password</label>
+              <input
+                type="password"
+                class="form-control"
+                id="newPassword"
+                placeholder="Enter new password (min 6 chars)"
+              />
+            </div>
+            <div class="mb-3">
+              <label class="form-label small text-muted"
+                >Confirm New Password</label
+              >
+              <input
+                type="password"
+                class="form-control"
+                id="confirmPassword"
+                placeholder="Confirm new password"
+              />
+            </div>
+            <button type="submit" class="btn btn-primary btn-sm">
+              <i class="bi bi-shield-check me-1"></i>Change Password
+            </button>
+            <span class="ms-2 small text-success d-none" id="passwordSuccess">
+              <i class="bi bi-check-circle me-1"></i>Password changed
+            </span>
+            <span
+              class="ms-2 small text-danger d-none"
+              id="passwordError"
+            ></span>
+          </form>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-section">
+          <h6>
+            <i
+              class="bi bi-info-circle-fill me-2"
+              style="color: var(--accent)"
+            ></i
+            >Account Details
+          </h6>
+          <div class="row g-3">
+            <div class="col-sm-6">
+              <div class="small text-muted mb-1">License Key</div>
+              <div
+                class="fw-semibold small"
+                id="settingsLicense"
+                style="font-family: monospace"
+              >
+                —
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="small text-muted mb-1">Member Since</div>
+              <div class="fw-semibold small" id="settingsJoined">—</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-divider"></div>
+
+        <div class="settings-section mb-0">
+          <h6 class="text-danger">
+            <i class="bi bi-exclamation-triangle-fill me-2"></i>Danger Zone
+          </h6>
+          <div class="danger-zone">
+            <div class="d-flex align-items-center justify-content-between">
+              <div>
+                <div class="fw-semibold small">Delete Account</div>
+                <div class="text-muted" style="font-size: 0.78rem">
+                  Permanently delete your account and all associated data. This
+                  action cannot be undone.
+                </div>
+              </div>
+              <button
+                class="btn btn-sm btn-outline-danger"
+                id="deleteAccountBtn"
+              >
+                <i class="bi bi-trash3 me-1"></i>Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %} {% block extra_js %}
+<script>
+  (function () {
+    "use strict";
+
+    const setText = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v;
+    };
+
+    /* ─── Load user data ─── */
+    async function loadUser() {
+      try {
+        const res = await fetch("/api/auth/me");
+        const u = await res.json();
+
+        document.getElementById("settingsName").value = u.full_name || "";
+        document.getElementById("settingsEmail").value = u.email || "";
+        setText("settingsDisplayName", u.full_name || "User");
+        setText("settingsDisplayEmail", u.email || "—");
+        setText("settingsLicense", u.license_key || "None");
+        setText(
+          "settingsJoined",
+          u.created_at
+            ? new Date(u.created_at).toLocaleDateString("en", {
+                year: "numeric",
+                month: "long",
+                day: "numeric",
+              })
+            : "—",
+        );
+
+        const badge = document.getElementById("settingsPlanBadge");
+        if (!u.is_active && badge) {
+          badge.className = "plan-badge inactive";
+          badge.innerHTML = '<i class="bi bi-x-circle-fill"></i> Inactive';
+        }
+
+        // Avatar initial
+        const avatar = document.getElementById("settingsAvatar");
+        if (u.full_name && avatar) {
+          const initials = u.full_name
+            .split(" ")
+            .map((n) => n[0])
+            .join("")
+            .toUpperCase()
+            .slice(0, 2);
+          avatar.innerHTML = `<span style="font-size:1.4rem;font-weight:700;">${initials}</span>`;
+        }
+      } catch (e) {
+        console.error("Failed to load user:", e);
+      }
+    }
+
+    /* ─── Profile form ─── */
+    document
+      .getElementById("profileForm")
+      .addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const successEl = document.getElementById("profileSuccess");
+        const errorEl = document.getElementById("profileError");
+        successEl.classList.add("d-none");
+        errorEl.classList.add("d-none");
+
+        const full_name = document.getElementById("settingsName").value.trim();
+        const email = document.getElementById("settingsEmail").value.trim();
+
+        try {
+          const res = await fetch("/api/account/profile", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ full_name, email }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            successEl.classList.remove("d-none");
+            setText("settingsDisplayName", full_name || "User");
+            setText("settingsDisplayEmail", email);
+            // Update sidebar
+            const sn = document.getElementById("sidebarUserName");
+            const se = document.getElementById("sidebarUserEmail");
+            if (sn) sn.textContent = full_name || "User";
+            if (se) se.textContent = email;
+            setTimeout(() => successEl.classList.add("d-none"), 3000);
+          } else {
+            errorEl.textContent = data.error || "Failed to update.";
+            errorEl.classList.remove("d-none");
+          }
+        } catch (err) {
+          errorEl.textContent = "Network error.";
+          errorEl.classList.remove("d-none");
+        }
+      });
+
+    /* ─── Password form ─── */
+    document
+      .getElementById("passwordForm")
+      .addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const successEl = document.getElementById("passwordSuccess");
+        const errorEl = document.getElementById("passwordError");
+        successEl.classList.add("d-none");
+        errorEl.classList.add("d-none");
+
+        const current_password =
+          document.getElementById("currentPassword").value;
+        const new_password = document.getElementById("newPassword").value;
+        const confirm_password =
+          document.getElementById("confirmPassword").value;
+
+        if (new_password !== confirm_password) {
+          errorEl.textContent = "New passwords do not match.";
+          errorEl.classList.remove("d-none");
+          return;
+        }
+
+        try {
+          const res = await fetch("/api/account/password", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ current_password, new_password }),
+          });
+          const data = await res.json();
+          if (res.ok) {
+            successEl.classList.remove("d-none");
+            document.getElementById("currentPassword").value = "";
+            document.getElementById("newPassword").value = "";
+            document.getElementById("confirmPassword").value = "";
+            setTimeout(() => successEl.classList.add("d-none"), 3000);
+          } else {
+            errorEl.textContent = data.error || "Failed to change password.";
+            errorEl.classList.remove("d-none");
+          }
+        } catch (err) {
+          errorEl.textContent = "Network error.";
+          errorEl.classList.remove("d-none");
+        }
+      });
+
+    /* ─── Delete account ─── */
+    document
+      .getElementById("deleteAccountBtn")
+      .addEventListener("click", async () => {
+        const confirmed = confirm(
+          "Are you sure you want to delete your account? This will permanently remove all your data including leads, scrape history, and settings. This cannot be undone.",
+        );
+        if (!confirmed) return;
+
+        const doubleConfirm = confirm(
+          "This is your FINAL WARNING. Type OK to proceed with account deletion.",
+        );
+        if (!doubleConfirm) return;
+
+        try {
+          const res = await fetch("/api/account/delete", { method: "DELETE" });
+          if (res.ok) {
+            window.location.href = "/login";
+          }
+        } catch (err) {
+          alert("Failed to delete account.");
+        }
+      });
+
+    loadUser();
+  })();
+</script>
+{% endblock %}

@@ -1,10 +1,14 @@
 /**
  * Dashboard — LeadGen
  * Fetches stats + history from API and renders charts.
+ * Memory-safe: properly destroys Chart.js instances & resets canvases.
  */
 
 (function () {
   "use strict";
+
+  /* ──────── guards ──────── */
+  let _loaded = false;
 
   /* ──────── helpers ──────── */
   const $ = (s) => document.querySelector(s);
@@ -38,8 +42,24 @@
   let qualityChartInstance = null;
   let trendChartInstance = null;
 
+  /** Safely destroy a chart and reset its canvas */
+  function destroyChart(instance, canvasId) {
+    if (instance) {
+      instance.destroy();
+    }
+    const canvas = document.getElementById(canvasId);
+    if (canvas) {
+      const ctx = canvas.getContext("2d");
+      if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+    return null;
+  }
+
   /* ──────── fetch & render ──────── */
   async function loadDashboard() {
+    if (_loaded) return;
+    _loaded = true;
+
     try {
       const [statsRes, historyRes] = await Promise.all([
         fetch("/api/dashboard/stats"),
@@ -55,6 +75,7 @@
       renderHistory(history);
     } catch (err) {
       console.error("Dashboard load error:", err);
+      _loaded = false;
     }
   }
 
@@ -79,7 +100,7 @@
     const ctx = document.getElementById("qualityChart");
     if (!ctx) return;
 
-    if (qualityChartInstance) qualityChartInstance.destroy();
+    qualityChartInstance = destroyChart(qualityChartInstance, "qualityChart");
 
     qualityChartInstance = new Chart(ctx, {
       type: "doughnut",
@@ -88,20 +109,28 @@
         datasets: [
           {
             data: [strong, medium, weak],
-            backgroundColor: ["#28a745", "#ffc107", "#dc3545"],
+            backgroundColor: ["#22c55e", "#eab308", "#ef4444"],
             borderWidth: 0,
             hoverOffset: 6,
           },
         ],
       },
       options: {
-        cutout: "70%",
+        cutout: "72%",
         responsive: false,
+        animation: { duration: 800, easing: "easeOutQuart" },
         plugins: {
           legend: { display: false },
           tooltip: {
+            backgroundColor: "rgba(23, 26, 45, 0.95)",
+            borderColor: "rgba(79, 140, 255, 0.2)",
+            borderWidth: 1,
+            titleColor: "#e4e6f0",
+            bodyColor: "#8e92b0",
+            cornerRadius: 8,
+            padding: 10,
             callbacks: {
-              label: (ctx) => `${ctx.label}: ${ctx.parsed} leads`,
+              label: (c) => ` ${c.label}: ${c.parsed} leads`,
             },
           },
         },
@@ -114,7 +143,6 @@
     const ctx = document.getElementById("trendChart");
     if (!ctx) return;
 
-    // Fill in missing days
     const days = [];
     const counts = [];
     const trendMap = {};
@@ -128,7 +156,7 @@
       counts.push(trendMap[key] || 0);
     }
 
-    if (trendChartInstance) trendChartInstance.destroy();
+    trendChartInstance = destroyChart(trendChartInstance, "trendChart");
 
     trendChartInstance = new Chart(ctx, {
       type: "line",
@@ -139,12 +167,15 @@
             label: "Leads",
             data: counts,
             fill: true,
-            backgroundColor: "rgba(79, 140, 255, 0.1)",
+            backgroundColor: "rgba(79, 140, 255, 0.08)",
             borderColor: "#4f8cff",
-            borderWidth: 2,
-            pointRadius: 4,
+            borderWidth: 2.5,
+            pointRadius: 5,
             pointBackgroundColor: "#4f8cff",
-            tension: 0.35,
+            pointBorderColor: "#171a2d",
+            pointBorderWidth: 2,
+            pointHoverRadius: 7,
+            tension: 0.4,
           },
         ],
       },
@@ -153,17 +184,26 @@
         maintainAspectRatio: false,
         scales: {
           x: {
-            grid: { color: "rgba(255,255,255,0.04)" },
-            ticks: { color: "#8e92b0" },
+            grid: { color: "rgba(255,255,255,0.03)", drawBorder: false },
+            ticks: { color: "#8e92b0", font: { size: 11 } },
           },
           y: {
             beginAtZero: true,
-            grid: { color: "rgba(255,255,255,0.04)" },
-            ticks: { color: "#8e92b0", precision: 0 },
+            grid: { color: "rgba(255,255,255,0.03)", drawBorder: false },
+            ticks: { color: "#8e92b0", precision: 0, font: { size: 11 } },
           },
         },
         plugins: {
           legend: { display: false },
+          tooltip: {
+            backgroundColor: "rgba(23, 26, 45, 0.95)",
+            borderColor: "rgba(79, 140, 255, 0.2)",
+            borderWidth: 1,
+            titleColor: "#e4e6f0",
+            bodyColor: "#8e92b0",
+            cornerRadius: 8,
+            padding: 10,
+          },
         },
       },
     });
@@ -187,7 +227,7 @@
 
     if (!html)
       html =
-        '<tr><td colspan="3" class="text-center text-muted">No data yet</td></tr>';
+        '<tr><td colspan="3" class="text-center text-muted py-3">No data yet</td></tr>';
     body.innerHTML = html;
   }
 
@@ -206,8 +246,9 @@
       return;
     }
 
+    const limited = rows.slice(0, 15);
     let html = "";
-    rows.forEach((r) => {
+    limited.forEach((r) => {
       const toolLabel = TOOL_LABELS[r.tool] || r.tool;
       const icon = TOOL_ICONS[r.tool] || "bi-cpu";
       const badgeClass =
@@ -215,7 +256,7 @@
       const total = (r.strong || 0) + (r.medium || 0) + (r.weak || 0) || 1;
       const sPct = Math.round(((r.strong || 0) / total) * 100);
       const mPct = Math.round(((r.medium || 0) / total) * 100);
-      const wPct = 100 - sPct - mPct;
+      const wPct = Math.max(0, 100 - sPct - mPct);
       const date = r.started_at
         ? new Date(r.started_at).toLocaleDateString("en", {
             month: "short",
@@ -223,18 +264,18 @@
             hour: "2-digit",
             minute: "2-digit",
           })
-        : "—";
+        : "\u2014";
 
-      html += `<tr>
-        <td><i class="bi ${icon} me-1"></i>${toolLabel}</td>
-        <td class="cell-truncate-sm">${r.keyword || "—"}</td>
-        <td class="cell-truncate-sm">${r.location || "—"}</td>
+      html += `<tr class="cursor-pointer" onclick="window.location.href='/database?scrape_id=${r.id}'" title="View leads from this scrape">
+        <td><i class="bi ${icon} me-1 opacity-75"></i> ${toolLabel}</td>
+        <td class="cell-truncate-sm">${r.keyword || "\u2014"}</td>
+        <td class="cell-truncate-sm">${r.location || "\u2014"}</td>
         <td class="text-end fw-semibold">${r.lead_count || 0}</td>
-        <td style="min-width:120px;">
+        <td style="min-width:110px;">
           <div class="d-flex quality-bar overflow-hidden">
-            <div style="width:${sPct}%; background:#28a745;" title="Strong: ${r.strong || 0}"></div>
-            <div style="width:${mPct}%; background:#ffc107;" title="Medium: ${r.medium || 0}"></div>
-            <div style="width:${wPct}%; background:#dc3545;" title="Weak: ${r.weak || 0}"></div>
+            <div style="width:${sPct}%; background:#22c55e;" title="Strong: ${r.strong || 0}"></div>
+            <div style="width:${mPct}%; background:#eab308;" title="Medium: ${r.medium || 0}"></div>
+            <div style="width:${wPct}%; background:#ef4444;" title="Weak: ${r.weak || 0}"></div>
           </div>
         </td>
         <td><span class="badge ${badgeClass}">${r.status}</span></td>
@@ -243,6 +284,12 @@
     });
     body.innerHTML = html;
   }
+
+  /* ──────── cleanup on page unload ──────── */
+  window.addEventListener("beforeunload", () => {
+    qualityChartInstance = destroyChart(qualityChartInstance, "qualityChart");
+    trendChartInstance = destroyChart(trendChartInstance, "trendChart");
+  });
 
   /* ──────── init ──────── */
   loadDashboard();

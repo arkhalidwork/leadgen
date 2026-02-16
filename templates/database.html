@@ -1,0 +1,357 @@
+{% extends "base.html" %} {% block title %}LeadGen — My Database{% endblock %}
+{% block topbar_title %}
+<h5 class="mb-0 fw-bold">Lead Database</h5>
+{% endblock %} {% block extra_css %}
+<style>
+  .db-stat-card {
+    border-left: 3px solid transparent;
+  }
+  .db-stat-card.border-accent {
+    border-left-color: #4f8cff;
+  }
+  .db-stat-card.border-success {
+    border-left-color: #22c55e;
+  }
+  .db-stat-card.border-warning {
+    border-left-color: #eab308;
+  }
+  .db-stat-card.border-info {
+    border-left-color: #06b6d4;
+  }
+
+  .filter-bar {
+    background: var(--surface-1);
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+  }
+  .filter-bar .form-select,
+  .filter-bar .form-control {
+    background: var(--surface-2);
+    border-color: var(--border-color);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+  }
+  .filter-bar .form-select:focus,
+  .filter-bar .form-control:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent-soft);
+  }
+
+  .leads-table th {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+  }
+  .leads-table td {
+    vertical-align: middle;
+    font-size: 0.85rem;
+  }
+  .leads-table .cell-title {
+    max-width: 200px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .leads-table .cell-email {
+    max-width: 180px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .quality-badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .quality-badge.strong {
+    background: rgba(34, 197, 94, 0.12);
+    color: #22c55e;
+  }
+  .quality-badge.medium {
+    background: rgba(234, 179, 8, 0.12);
+    color: #eab308;
+  }
+  .quality-badge.weak {
+    background: rgba(239, 68, 68, 0.12);
+    color: #ef4444;
+  }
+
+  .tool-badge {
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-size: 0.72rem;
+    font-weight: 600;
+  }
+  .tool-badge.gmaps {
+    background: rgba(66, 133, 244, 0.12);
+    color: #4285f4;
+  }
+  .tool-badge.linkedin {
+    background: rgba(10, 102, 194, 0.12);
+    color: #0a66c2;
+  }
+  .tool-badge.instagram {
+    background: rgba(228, 64, 95, 0.12);
+    color: #e4405f;
+  }
+  .tool-badge.webcrawler {
+    background: rgba(255, 107, 53, 0.12);
+    color: #ff6b35;
+  }
+
+  .pagination-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .pagination-controls .btn {
+    padding: 4px 12px;
+    font-size: 0.82rem;
+  }
+
+  .lead-detail-modal .modal-content {
+    background: var(--surface-1);
+    border: 1px solid var(--border-color);
+  }
+  .lead-detail-modal .detail-row {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border-color);
+  }
+  .lead-detail-modal .detail-label {
+    width: 130px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+  }
+  .lead-detail-modal .detail-value {
+    flex: 1;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    word-break: break-all;
+  }
+
+  .scrape-filter-banner {
+    background: var(--accent-soft);
+    border: 1px solid rgba(79, 140, 255, 0.2);
+    border-radius: 10px;
+  }
+  .check-col {
+    width: 36px;
+  }
+  .bulk-bar {
+    background: var(--surface-2);
+    border-radius: 10px;
+    border: 1px solid var(--border-color);
+  }
+</style>
+{% endblock %} {% block content %}
+
+<!-- Stats Row -->
+<div class="row g-3 mb-4">
+  <div class="col-6 col-md-3">
+    <div class="stat-card db-stat-card border-accent p-3">
+      <div class="stat-number" id="dbStatTotal">&mdash;</div>
+      <div class="text-muted small fw-medium">Total Leads</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card db-stat-card border-success p-3">
+      <div class="stat-number" style="color: #22c55e" id="dbStatEmail">
+        &mdash;
+      </div>
+      <div class="text-muted small fw-medium">With Email</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card db-stat-card border-warning p-3">
+      <div class="stat-number" style="color: #eab308" id="dbStatPhone">
+        &mdash;
+      </div>
+      <div class="text-muted small fw-medium">With Phone</div>
+    </div>
+  </div>
+  <div class="col-6 col-md-3">
+    <div class="stat-card db-stat-card border-info p-3">
+      <div class="stat-number" style="color: #06b6d4" id="dbStatStrong">
+        &mdash;
+      </div>
+      <div class="text-muted small fw-medium">Strong Quality</div>
+    </div>
+  </div>
+</div>
+
+<!-- Scrape filter banner (shown when viewing a specific scrape) -->
+<div class="scrape-filter-banner p-3 mb-4 d-none" id="scrapeFilterBanner">
+  <div class="d-flex align-items-center justify-content-between">
+    <div>
+      <i class="bi bi-funnel-fill me-2" style="color: var(--accent)"></i>
+      <span class="fw-semibold small"
+        >Viewing leads from scrape #<span id="scrapeFilterId"></span
+      ></span>
+      <span class="text-muted small ms-2" id="scrapeFilterMeta"></span>
+    </div>
+    <button class="btn btn-sm btn-outline-light" id="clearScrapeFilter">
+      <i class="bi bi-x-lg me-1"></i>Show All
+    </button>
+  </div>
+</div>
+
+<!-- Filter Bar -->
+<div class="filter-bar p-3 mb-4">
+  <div class="row g-2 align-items-end">
+    <div class="col-md-3">
+      <label class="form-label small text-muted mb-1">Search</label>
+      <div class="input-group input-group-sm">
+        <span
+          class="input-group-text"
+          style="
+            background: var(--surface-2);
+            border-color: var(--border-color);
+          "
+        >
+          <i class="bi bi-search text-muted"></i>
+        </span>
+        <input
+          type="text"
+          class="form-control"
+          id="dbSearch"
+          placeholder="Name, email, phone..."
+        />
+      </div>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small text-muted mb-1">Source</label>
+      <select class="form-select form-select-sm" id="dbFilterTool">
+        <option value="">All Sources</option>
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small text-muted mb-1">Keyword</label>
+      <select class="form-select form-select-sm" id="dbFilterKeyword">
+        <option value="">All Keywords</option>
+      </select>
+    </div>
+    <div class="col-md-2">
+      <label class="form-label small text-muted mb-1">Location</label>
+      <select class="form-select form-select-sm" id="dbFilterLocation">
+        <option value="">All Locations</option>
+      </select>
+    </div>
+    <div class="col-md-1">
+      <label class="form-label small text-muted mb-1">Quality</label>
+      <select class="form-select form-select-sm" id="dbFilterQuality">
+        <option value="">All</option>
+        <option value="strong">Strong</option>
+        <option value="medium">Medium</option>
+        <option value="weak">Weak</option>
+      </select>
+    </div>
+    <div class="col-md-2 d-flex gap-2">
+      <button class="btn btn-sm btn-primary flex-grow-1" id="dbApplyFilters">
+        <i class="bi bi-funnel-fill me-1"></i>Filter
+      </button>
+      <button
+        class="btn btn-sm btn-outline-secondary"
+        id="dbExportBtn"
+        title="Export CSV"
+      >
+        <i class="bi bi-download"></i>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Bulk actions bar -->
+<div class="bulk-bar p-2 px-3 mb-3 d-none" id="bulkBar">
+  <div class="d-flex align-items-center justify-content-between">
+    <span class="small fw-semibold"
+      ><span id="bulkCount">0</span> selected</span
+    >
+    <div class="d-flex gap-2">
+      <button class="btn btn-sm btn-outline-danger" id="bulkDeleteBtn">
+        <i class="bi bi-trash3 me-1"></i>Delete Selected
+      </button>
+      <button class="btn btn-sm btn-outline-secondary" id="bulkClearBtn">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Leads Table -->
+<div class="card mb-4">
+  <div class="card-body p-0">
+    <div class="table-responsive">
+      <table class="table table-dark table-hover leads-table mb-0">
+        <thead>
+          <tr>
+            <th class="check-col">
+              <input type="checkbox" class="form-check-input" id="selectAll" />
+            </th>
+            <th>Title</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Source</th>
+            <th>Keyword</th>
+            <th>Location</th>
+            <th>Quality</th>
+            <th>Date</th>
+            <th class="text-center" style="width: 60px">Actions</th>
+          </tr>
+        </thead>
+        <tbody id="leadsTableBody">
+          <tr>
+            <td colspan="10" class="text-center text-muted py-5">
+              <i class="bi bi-database me-2"></i>Loading leads...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Pagination -->
+<div class="d-flex align-items-center justify-content-between mb-4">
+  <div class="text-muted small" id="paginationInfo">—</div>
+  <div class="pagination-controls">
+    <button class="btn btn-outline-secondary btn-sm" id="prevPage" disabled>
+      <i class="bi bi-chevron-left"></i> Prev
+    </button>
+    <span class="small fw-semibold" id="pageIndicator">1</span>
+    <button class="btn btn-outline-secondary btn-sm" id="nextPage" disabled>
+      Next <i class="bi bi-chevron-right"></i>
+    </button>
+  </div>
+</div>
+
+<!-- Lead Detail Modal -->
+<div class="modal fade lead-detail-modal" id="leadDetailModal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header border-0 pb-0">
+        <h6 class="modal-title fw-bold">
+          <i class="bi bi-person-vcard me-2" style="color: var(--accent)"></i
+          >Lead Details
+        </h6>
+        <button
+          type="button"
+          class="btn-close btn-close-white"
+          data-bs-dismiss="modal"
+        ></button>
+      </div>
+      <div class="modal-body" id="leadDetailBody">
+        <!-- Populated by JS -->
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %} {% block extra_js %}
+<script src="{{ url_for('static', filename='js/database.js') }}"></script>
+{% endblock %}

@@ -23,14 +23,14 @@
       <!-- Sidebar -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-brand">
-          <i class="bi bi-boxes text-primary"></i>
-          <span class="sidebar-brand-text">LeadGen</span>
+          <i class="bi bi-boxes"></i>
+          <span>LeadGen</span>
         </div>
 
         <nav class="sidebar-nav">
           <div class="sidebar-section-label">Main</div>
           <a
-            href="/"
+            href="/dashboard"
             class="sidebar-link {% if active_page == 'dashboard' %}active{% endif %}"
           >
             <i class="bi bi-grid-1x2-fill"></i><span>Dashboard</span>
@@ -61,13 +61,34 @@
           >
             <i class="bi bi-globe2"></i><span>Web Crawler</span>
           </a>
+
+          <div class="sidebar-section-label mt-3">Data</div>
+          <a
+            href="/database"
+            class="sidebar-link {% if active_page == 'database' %}active{% endif %}"
+          >
+            <i class="bi bi-database-fill"></i><span>My Database</span>
+          </a>
+
+          <div class="sidebar-section-label mt-3">Account</div>
+          <a
+            href="/settings"
+            class="sidebar-link {% if active_page == 'settings' %}active{% endif %}"
+          >
+            <i class="bi bi-gear-fill"></i><span>Settings</span>
+          </a>
         </nav>
 
         <div class="sidebar-footer">
           <div class="sidebar-user">
-            <div class="sidebar-avatar">
+            <a
+              href="/settings"
+              class="sidebar-avatar"
+              title="Account Settings"
+              style="text-decoration: none; color: inherit"
+            >
               <i class="bi bi-person-fill"></i>
-            </div>
+            </a>
             <div class="sidebar-user-info">
               <div class="sidebar-user-name" id="sidebarUserName">User</div>
               <div class="sidebar-user-email" id="sidebarUserEmail">—</div>
