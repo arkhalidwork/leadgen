@@ -6,7 +6,9 @@ services:
       - "5000:5000"
     volumes:
       - ./output:/app/output
+      - ./data:/app/data
     environment:
+      - LEADGEN_DB_PATH=/app/data/leadgen.db
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
