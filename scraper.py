@@ -7,7 +7,6 @@ import time
 import re
 import logging
 import warnings
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from dataclasses import dataclass, field, asdict
 import requests
@@ -559,14 +558,26 @@ class GoogleMapsScraper:
                         break
 
                     progress = base_pct + 3 + int((idx / total) * (80 / total_queries))
-                    if idx % 5 == 0:
-                        self._report_progress(
-                            f"[Area {qi + 1}/{total_queries}] Business {idx + 1}/{total} (total: {len(all_leads)})",
-                            min(progress, 82),
-                        )
+                    self._report_progress(
+                        f"[Area {qi + 1}/{total_queries}] Business {idx + 1}/{total} (total: {len(all_leads)})",
+                        min(progress, 95),
+                    )
 
                     lead = self._extract_business_detail(url)
                     if lead.business_name and lead.business_name != "Unknown":
+                        # Immediately crawl website for contact details before moving to next lead
+                        if lead.website:
+                            self._area_stats["websites_total"] = self._area_stats.get("websites_total", 0) + 1
+                            self._report_progress(
+                                f"[Area {qi + 1}/{total_queries}] Crawling website for {lead.business_name}...",
+                                min(progress, 95),
+                            )
+                            try:
+                                self._scrape_website(lead)
+                            except Exception as e:
+                                logger.debug(f"Website scrape error for {lead.business_name}: {e}")
+                            self._area_stats["websites_scanned"] = self._area_stats.get("websites_scanned", 0) + 1
+
                         all_leads.append(lead)
                         # --- Update live partial leads ---
                         self._partial_leads = [asdict(l) for l in all_leads]
@@ -579,41 +590,6 @@ class GoogleMapsScraper:
                 # Short pause between sub-area searches
                 if qi < total_queries - 1 and not self._should_stop:
                     time.sleep(0.5)  # Reduced from 1s
-
-            # Phase 2: Scrape websites for emails & socials in parallel
-            leads_with_websites = [l for l in all_leads if l.website]
-            if leads_with_websites and not self._should_stop:
-                ws_total = len(leads_with_websites)
-                self._area_stats["websites_total"] = ws_total
-                self._area_stats["websites_scanned"] = 0
-                self._report_progress(
-                    f"Scanning {ws_total} websites for emails & socials...", 82
-                )
-
-                with ThreadPoolExecutor(max_workers=15) as executor:
-                    futures = {
-                        executor.submit(self._scrape_website, lead): lead
-                        for lead in leads_with_websites
-                    }
-                    done_count = 0
-                    for future in as_completed(futures):
-                        done_count += 1
-                        self._area_stats["websites_scanned"] = done_count
-                        if self._should_stop:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            break
-                        try:
-                            future.result(timeout=8)
-                        except Exception as e:
-                            logger.debug(f"Website scrape error: {e}")
-                        # Update partial leads after each website scan
-                        self._partial_leads = [asdict(l) for l in all_leads]
-                        if done_count % 10 == 0 or done_count == ws_total:
-                            pct = 82 + int((done_count / ws_total) * 16)
-                            self._report_progress(
-                                f"Scanned {done_count}/{ws_total} websites... ({len(all_leads)} leads)",
-                                min(pct, 98),
-                            )
 
             # Convert dataclass leads to dicts
             leads = [asdict(l) for l in all_leads]
