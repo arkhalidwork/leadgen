@@ -8,6 +8,7 @@ Supports multi-role executive search (CEO, Director, Manager, etc.)
 with anti-detection measures and multiple fallback parsing strategies.
 """
 
+import os
 import re
 import time
 import random
@@ -161,7 +162,18 @@ class LinkedInScraper:
         ua = random.choice(self.USER_AGENTS)
         chrome_options.add_argument(f"--user-agent={ua}")
 
-        self.driver = webdriver.Chrome(options=chrome_options)
+        # Use system-installed Chromium if available (Docker / ARM64)
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin:
+            chrome_options.binary_location = chrome_bin
+
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path:
+            from selenium.webdriver.chrome.service import Service
+            service = Service(executable_path=chromedriver_path)
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.implicitly_wait(2)
 
         # Remove navigator.webdriver flag so detection scripts see undefined

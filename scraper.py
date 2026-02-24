@@ -3,6 +3,7 @@ Google Maps Lead Scraper Module
 Scrapes business listings from Google Maps for lead generation.
 """
 
+import os
 import time
 import re
 import logging
@@ -201,8 +202,17 @@ class GoogleMapsScraper:
         chrome_options.add_argument("--log-level=3")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
 
-        # Use Selenium's built-in driver manager (auto-downloads matching ChromeDriver)
-        self.driver = webdriver.Chrome(options=chrome_options)
+        # Use system-installed Chromium if available (Docker / ARM64)
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin:
+            chrome_options.binary_location = chrome_bin
+
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path:
+            service = Service(executable_path=chromedriver_path)
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+        else:
+            self.driver = webdriver.Chrome(options=chrome_options)
         self.driver.implicitly_wait(2)
 
     def _search_maps(self, query: str):

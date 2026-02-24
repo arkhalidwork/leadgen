@@ -5,12 +5,33 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./output:/app/output
-      - ./data:/app/data
+      - leadgen-output:/app/output
+      - leadgen-data:/app/data
+    env_file:
+      - .env
     environment:
       - LEADGEN_DB_PATH=/app/data/leadgen.db
+      - LEADGEN_OUTPUT_DIR=/app/output
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
-    # Chrome needs extra shared memory
+    # Chrome/Chromium needs extra shared memory for rendering
     shm_size: "2gb"
+    # Resource limits tuned for Oracle Cloud Free Tier (4 OCPU / 24GB RAM)
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 8G
+        reservations:
+          cpus: "1.0"
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  leadgen-output:
+  leadgen-data:

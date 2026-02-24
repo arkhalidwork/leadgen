@@ -2,14 +2,16 @@ FROM python:3.11-slim
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
-# Ensure Chrome finds the right binary and runs rootless
-ENV CHROME_BIN=/usr/bin/google-chrome-stable
+# Production defaults
+ENV FLASK_ENV=production
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
-# Install Chrome and dependencies
+# Install Chromium (works on both amd64 AND arm64 — required for Oracle Cloud ARM)
+# Also installs matching chromedriver so Selenium can find it automatically
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    gnupg \
-    unzip \
+    chromium \
+    chromium-driver \
     curl \
     fonts-liberation \
     libasound2 \
@@ -32,28 +34,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libcairo2 \
     xdg-utils \
-    && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
-    && apt-get install -y /tmp/chrome.deb \
-    && rm /tmp/chrome.deb \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Tell Selenium where to find Chromium and chromedriver
+ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
+# Prevent Selenium Manager from trying to download Chrome/chromedriver
+ENV SE_AVOID_BROWSER_DOWNLOAD=true
+
+# Create a non-root user for security
+RUN groupadd -r leadgen && useradd -r -g leadgen -d /app -s /sbin/nologin leadgen
 
 # Set working directory
 WORKDIR /app
 
 # Copy requirements first for layer caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy ALL application code
+# Copy ONLY production code (no desktop/build files)
 COPY app.py scraper.py linkedin_scraper.py instagram_scraper.py web_crawler.py ./
 COPY templates/ templates/
 COPY static/ static/
 
-# Create output directory
-RUN mkdir -p output
+# Create output and data directories
+RUN mkdir -p output data && chown -R leadgen:leadgen /app
+
+# Switch to non-root user
+USER leadgen
 
 # Expose port
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--timeout", "300", "app:app"]
+# Health check for container orchestrators
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD curl -f http://localhost:5000/health || exit 1
+
+CMD ["gunicorn", \
+     "--bind", "0.0.0.0:5000", \
+     "--workers", "2", \
+     "--threads", "4", \
+     "--timeout", "300", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "--log-level", "info", \
+     "app:app"]

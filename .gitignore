@@ -1,8 +1,78 @@
+# ==========================================
+# Python
+# ==========================================
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+*.so
+
+# ==========================================
+# Virtual environments
+# ==========================================
 venv/
+.venv/
+env/
+
+# ==========================================
+# Environment / secrets
+# ==========================================
 .env
-output/
-*.csv
-.DS_Store
+.env.local
+.env.production
+*.pem
+*.key
+
+# ==========================================
+# Database (local dev only — prod uses cloud)
+# ==========================================
 leadgen.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ==========================================
+# Output / data (generated at runtime)
+# ==========================================
+output/
+data/
+*.csv
+
+# ==========================================
+# Desktop / build artifacts (NOT for cloud)
+# ==========================================
+desktop.py
+build_mac.sh
+build_win.bat
+leadgen.spec
+build/
+dist/
+*.dmg
+*.exe
+*.app
+
+# ==========================================
+# OS files
+# ==========================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ==========================================
+# IDE
+# ==========================================
+.vscode/
+.idea/
+*.code-workspace
+
+# ==========================================
+# Docker local overrides
+# ==========================================
+docker-compose.override.yml

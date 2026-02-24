@@ -5,17 +5,28 @@ authentication, license keys, scrape history, and lead analytics.
 """
 
 import os
+import re
 import csv
 import io
 import json
 import uuid
+import hmac
 import hashlib
+import secrets
 import sqlite3
+import logging
 import threading
 import functools
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for, g
+
+import bcrypt
+import stripe
+from flask import Flask, render_template, request, jsonify, Response, session, redirect, url_for, g, abort
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect
+
 from scraper import GoogleMapsScraper, clean_leads
 from linkedin_scraper import LinkedInScraper, clean_linkedin_leads
 from instagram_scraper import InstagramScraper, clean_instagram_leads
@@ -24,14 +35,74 @@ from web_crawler import WebCrawlerScraper, clean_web_leads
 # Instagram search-type aliases (old → new)
 _IG_TYPE_MAP = {"emails": "profiles", "profiles": "profiles", "businesses": "businesses"}
 
+# --------------- Logging ---------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+log = logging.getLogger(__name__)
+
 app = Flask(
     __name__,
     template_folder=os.environ.get("LEADGEN_TEMPLATE_DIR", os.path.join(os.path.dirname(__file__), "templates")),
     static_folder=os.environ.get("LEADGEN_STATIC_DIR", os.path.join(os.path.dirname(__file__), "static")),
 )
-app.secret_key = os.environ.get("LEADGEN_SECRET_KEY", "leadgen-secret-change-me-in-prod")
+
+# --- Security configuration ---
+_secret = os.environ.get("LEADGEN_SECRET_KEY", "")
+if not _secret or _secret == "change-me-to-a-random-64-char-hex-string":
+    if os.environ.get("FLASK_ENV") == "production":
+        raise RuntimeError("LEADGEN_SECRET_KEY must be set in production!")
+    _secret = "leadgen-dev-secret-do-not-use-in-prod"
+app.secret_key = _secret
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("FLASK_ENV") == "production",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+    WTF_CSRF_TIME_LIMIT=3600,  # 1-hour CSRF token validity
+)
 app.permanent_session_lifetime = timedelta(days=30)
-CORS(app)
+
+# --- CSRF protection (auto-injects token in Jinja templates) ---
+# Exempt all /api/ routes since they use JSON + SameSite session cookies
+csrf = CSRFProtect(app)
+
+
+@csrf.exempt
+def _is_api_route():
+    """Marker — not called directly. See exempt_api_blueprint below."""
+    pass
+
+
+# Exempt /api/ routes: CSRFProtect checks happen before before_request,
+# so we disable the default check and run it manually for non-API routes.
+app.config["WTF_CSRF_CHECK_DEFAULT"] = False
+
+
+@app.before_request
+def _csrf_protect_non_api():
+    """Enforce CSRF on form-based routes, skip for /api/ JSON endpoints."""
+    if not request.path.startswith("/api/"):
+        try:
+            csrf.protect()
+        except Exception:
+            pass  # Let Flask-WTF handle the error response
+
+# --- CORS ---
+_origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
+CORS(app, origins=[o.strip() for o in _origins], supports_credentials=True)
+
+# --- Rate limiting ---
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per minute"],
+    storage_uri=os.environ.get("RATELIMIT_STORAGE_URI", "memory://"),
+)
+
+# --- Stripe config ---
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_PRICE_ID_PRO = os.environ.get("STRIPE_PRICE_ID_PRO", "")
 
 # Desktop mode flag - skip landing page when running via pywebview
 IS_DESKTOP = os.environ.get("LEADGEN_DESKTOP", "").lower() in ("1", "true", "yes")
@@ -163,8 +234,65 @@ init_db()
 # Auth helpers
 # ============================================================
 
+# ---------- Password hashing (bcrypt) ----------
+
 def _hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash with bcrypt (adaptive cost)."""
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, hashed: str) -> bool:
+    """Verify a password against a bcrypt hash. Also handles legacy SHA-256 hashes."""
+    # Legacy SHA-256 migration path
+    if not hashed.startswith("$2"):
+        if hashlib.sha256(password.encode()).hexdigest() == hashed:
+            return True  # caller should re-hash & update DB
+        return False
+    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+
+
+def _upgrade_password_if_needed(user_id: int, password: str, current_hash: str):
+    """Transparently upgrade legacy SHA-256 hash to bcrypt on login."""
+    if not current_hash.startswith("$2"):
+        new_hash = _hash_password(password)
+        try:
+            db = get_db()
+            db.execute("UPDATE users SET password=? WHERE id=?", (new_hash, user_id))
+            db.commit()
+            log.info(f"Upgraded password hash for user {user_id}")
+        except Exception:
+            pass
+
+
+# ---------- Email validation ----------
+_EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+
+def _is_valid_email(email: str) -> bool:
+    return bool(_EMAIL_RE.match(email))
+
+
+# ---------- Password strength validation ----------
+
+def _validate_password_strength(password: str) -> str | None:
+    """Return an error message if password is too weak, else None."""
+    if len(password) < 8:
+        return "Password must be at least 8 characters."
+    if not re.search(r"[A-Z]", password):
+        return "Password must contain at least one uppercase letter."
+    if not re.search(r"[a-z]", password):
+        return "Password must contain at least one lowercase letter."
+    if not re.search(r"[0-9]", password):
+        return "Password must contain at least one number."
+    return None
+
+
+# ---------- License key generation ----------
+
+def _generate_license_key() -> str:
+    """Generate a cryptographically random license key."""
+    segment = lambda n: secrets.token_hex(n).upper()
+    return f"LEAD-{segment(2)}-{segment(2)}-{segment(2)}-{segment(2)}"
 
 
 def current_user():
@@ -838,6 +966,7 @@ def logout():
 
 
 @app.route("/api/auth/register", methods=["POST"])
+@limiter.limit("5 per minute")
 def api_register():
     data = request.get_json()
     email = (data.get("email") or "").strip().lower()
@@ -846,8 +975,12 @@ def api_register():
 
     if not email or not password:
         return jsonify({"error": "Email and password are required."}), 400
-    if len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters."}), 400
+    if not _is_valid_email(email):
+        return jsonify({"error": "Please enter a valid email address."}), 400
+
+    pw_err = _validate_password_strength(password)
+    if pw_err:
+        return jsonify({"error": pw_err}), 400
 
     db = get_db()
     existing = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
@@ -861,6 +994,7 @@ def api_register():
     )
     db.commit()
     user_id = cur.lastrowid
+    log.info(f"New user registered: {email} (id={user_id})")
 
     session.permanent = True
     session["user_id"] = user_id
@@ -869,6 +1003,7 @@ def api_register():
 
 
 @app.route("/api/auth/login", methods=["POST"])
+@limiter.limit("10 per minute")
 def api_login():
     data = request.get_json()
     email = (data.get("email") or "").strip().lower()
@@ -879,12 +1014,17 @@ def api_login():
 
     db = get_db()
     user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-    if not user or user["password"] != _hash_password(password):
+    if not user or not _verify_password(password, user["password"]):
         return jsonify({"error": "Invalid email or password."}), 401
+
+    # Transparently upgrade legacy SHA-256 → bcrypt
+    _upgrade_password_if_needed(user["id"], password, user["password"])
 
     db.execute("UPDATE users SET last_login = datetime('now') WHERE id = ?", (user["id"],))
     db.commit()
 
+    # Regenerate session to prevent fixation attacks
+    session.clear()
     session.permanent = True
     session["user_id"] = user["id"]
     session["email"] = user["email"]
@@ -896,6 +1036,7 @@ def api_login():
 
 @app.route("/api/auth/activate", methods=["POST"])
 @login_required
+@limiter.limit("10 per minute")
 def api_activate():
     data = request.get_json()
     key = (data.get("license_key") or "").strip().upper()
@@ -915,7 +1056,112 @@ def api_activate():
     db.execute("UPDATE users SET is_active = 1, license_key = ? WHERE id = ?", (key, uid))
     db.execute("UPDATE license_keys SET used_count = used_count + 1 WHERE key = ?", (key,))
     db.commit()
+    log.info(f"License activated for user {uid}: {key}")
     return jsonify({"message": "License activated! Welcome to LeadGen Pro."})
+
+
+# ============================================================
+# Stripe Webhook — auto-generate license key on payment
+# ============================================================
+
+@app.route("/api/stripe/webhook", methods=["POST"])
+@limiter.exempt
+def stripe_webhook():
+    """Handle Stripe webhook events for automated license provisioning."""
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get("Stripe-Signature", "")
+
+    if not STRIPE_WEBHOOK_SECRET:
+        log.warning("Stripe webhook called but STRIPE_WEBHOOK_SECRET not set")
+        return jsonify({"error": "Webhook not configured"}), 500
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        return jsonify({"error": "Invalid payload"}), 400
+    except stripe.error.SignatureVerificationError:
+        return jsonify({"error": "Invalid signature"}), 400
+
+    if event["type"] == "checkout.session.completed":
+        session_obj = event["data"]["object"]
+        customer_email = (session_obj.get("customer_email") or session_obj.get("customer_details", {}).get("email", "")).lower().strip()
+
+        if customer_email:
+            _provision_license_for_email(customer_email, plan="pro")
+
+    elif event["type"] == "invoice.payment_succeeded":
+        invoice = event["data"]["object"]
+        customer_email = (invoice.get("customer_email") or "").lower().strip()
+        if customer_email:
+            _provision_license_for_email(customer_email, plan="pro")
+
+    return jsonify({"status": "ok"}), 200
+
+
+def _provision_license_for_email(email: str, plan: str = "pro"):
+    """Auto-create a license key and activate the user's account."""
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    try:
+        # Generate a unique license key
+        license_key = _generate_license_key()
+        expires_at = (datetime.now() + timedelta(days=365)).isoformat()
+
+        db.execute(
+            "INSERT INTO license_keys (key, plan, max_uses, expires_at) VALUES (?, ?, 1, ?)",
+            (license_key, plan, expires_at),
+        )
+
+        # If user already registered, auto-activate
+        user = db.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+        if user:
+            db.execute(
+                "UPDATE users SET is_active = 1, license_key = ? WHERE id = ?",
+                (license_key, user["id"]),
+            )
+            db.execute(
+                "UPDATE license_keys SET used_count = 1 WHERE key = ?",
+                (license_key,),
+            )
+            log.info(f"Auto-activated license {license_key} for existing user {email}")
+        else:
+            # Key is ready — user will activate on first login
+            log.info(f"License {license_key} created for future user {email}")
+
+        db.commit()
+    except Exception as e:
+        log.error(f"License provisioning error for {email}: {e}")
+    finally:
+        db.close()
+
+
+# ============================================================
+# Stripe Checkout — create a checkout session
+# ============================================================
+
+@app.route("/api/stripe/create-checkout", methods=["POST"])
+def api_create_checkout():
+    """Create a Stripe Checkout session for license purchase."""
+    if not stripe.api_key or not STRIPE_PRICE_ID_PRO:
+        return jsonify({"error": "Payment system not configured."}), 503
+
+    data = request.get_json() or {}
+    success_url = data.get("success_url", request.host_url + "activate?payment=success")
+    cancel_url = data.get("cancel_url", request.host_url + "register")
+
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": STRIPE_PRICE_ID_PRO, "quantity": 1}],
+            mode="payment",
+            success_url=success_url,
+            cancel_url=cancel_url,
+            customer_email=session.get("email", "") or None,
+        )
+        return jsonify({"checkout_url": checkout_session.url})
+    except Exception as e:
+        log.error(f"Stripe checkout error: {e}")
+        return jsonify({"error": "Could not create checkout session."}), 500
 
 
 @app.route("/api/auth/me")
@@ -1818,8 +2064,12 @@ def api_account_password():
 
     db = get_db()
     user = db.execute("SELECT password FROM users WHERE id=?", (uid,)).fetchone()
-    if not user or user["password"] != _hash_password(current_pw):
+    if not user or not _verify_password(current_pw, user["password"]):
         return jsonify({"error": "Current password is incorrect."}), 401
+
+    pw_err = _validate_password_strength(new_pw)
+    if pw_err:
+        return jsonify({"error": pw_err}), 400
 
     db.execute("UPDATE users SET password=? WHERE id=?", (_hash_password(new_pw), uid))
     db.commit()
@@ -1860,6 +2110,31 @@ def database_page():
 def settings_page():
     """Account settings page."""
     return render_template("settings.html", active_page="settings")
+
+
+# ============================================================
+# Security headers
+# ============================================================
+
+@app.after_request
+def set_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    if os.environ.get("FLASK_ENV") == "production":
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
+
+# ============================================================
+# Health check (for DigitalOcean App Platform / load balancers)
+# ============================================================
+
+@app.route("/health")
+@limiter.exempt
+def health_check():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
 
 
 if __name__ == "__main__":

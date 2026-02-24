@@ -25,6 +25,7 @@ Phase 4 — Profile enrichment       (visit profiles for bio/email/phone)
 Phase 5 — Deduplication & output
 """
 
+import os
 import re
 import time
 import random
@@ -291,7 +292,18 @@ class InstagramScraper:
         opts.add_experimental_option("useAutomationExtension", False)
         opts.add_argument(f"--user-agent={random.choice(self.USER_AGENTS)}")
 
-        self.driver = webdriver.Chrome(options=opts)
+        # Use system-installed Chromium if available (Docker / ARM64)
+        chrome_bin = os.environ.get("CHROME_BIN")
+        if chrome_bin:
+            opts.binary_location = chrome_bin
+
+        chromedriver_path = os.environ.get("CHROMEDRIVER_PATH")
+        if chromedriver_path:
+            from selenium.webdriver.chrome.service import Service
+            service = Service(executable_path=chromedriver_path)
+            self.driver = webdriver.Chrome(service=service, options=opts)
+        else:
+            self.driver = webdriver.Chrome(options=opts)
         self.driver.implicitly_wait(2)
 
         try:
