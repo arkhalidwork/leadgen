@@ -214,6 +214,24 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_leads_tool ON leads(user_id, tool);
         CREATE INDEX IF NOT EXISTS idx_leads_keyword ON leads(user_id, keyword);
         CREATE INDEX IF NOT EXISTS idx_leads_location ON leads(user_id, location);
+
+        CREATE TABLE IF NOT EXISTS email_templates (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            lead_id     INTEGER,
+            business_name TEXT DEFAULT '',
+            email       TEXT DEFAULT '',
+            subject     TEXT DEFAULT '',
+            body        TEXT DEFAULT '',
+            keyword     TEXT DEFAULT '',
+            location    TEXT DEFAULT '',
+            sender_info TEXT DEFAULT '{}',
+            created_at  TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            FOREIGN KEY (lead_id) REFERENCES leads(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_email_tpl_user ON email_templates(user_id);
+        CREATE INDEX IF NOT EXISTS idx_email_tpl_lead ON email_templates(lead_id);
     """)
     # Seed a demo license key if none exist
     cur = db.execute("SELECT COUNT(*) FROM license_keys")
@@ -1379,6 +1397,13 @@ def webcrawler_tool():
     return render_template("webcrawler.html", active_page="webcrawler")
 
 
+@app.route("/tools/email-outreach")
+@subscription_required
+def email_outreach_tool():
+    """Email Outreach Template Generator page."""
+    return render_template("email_outreach.html", active_page="email_outreach")
+
+
 # ============================================================
 # Google Maps API
 # ============================================================
@@ -1770,6 +1795,351 @@ def webcrawler_stop(job_id):
     job.status = "stopped"
     job.message = f"Stopped by user. Saved {len(job.leads)} leads."
     return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
+
+
+# ============================================================
+# Email Outreach API
+# ============================================================
+
+@app.route("/api/email-outreach/scan-website", methods=["POST"])
+@subscription_required
+def api_scan_sender_website():
+    """Scan the sender's website to extract services / description."""
+    data = request.get_json()
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "URL is required."}), 400
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    try:
+        import requests as ext_requests
+        from bs4 import BeautifulSoup as BS
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        resp = ext_requests.get(url, headers=headers, timeout=15, verify=False)
+        soup = BS(resp.text, "lxml")
+
+        # Extract title / company name
+        company_name = ""
+        title_tag = soup.find("title")
+        if title_tag:
+            company_name = title_tag.get_text(strip=True).split("|")[0].split("—")[0].split("-")[0].strip()
+
+        # Extract meta description
+        description = ""
+        meta_desc = soup.find("meta", attrs={"name": "description"})
+        if meta_desc:
+            description = meta_desc.get("content", "").strip()
+
+        # Extract services from headings, lists, and specific sections
+        services = []
+        # Look for service-related headings
+        for heading in soup.find_all(["h1", "h2", "h3", "h4"]):
+            text = heading.get_text(strip=True).lower()
+            if any(kw in text for kw in ["service", "solution", "offer", "product", "feature",
+                                          "what we do", "our work", "capabilities", "pricing"]):
+                # Get sibling content
+                parent = heading.find_parent(["section", "div"])
+                if parent:
+                    for li in parent.find_all("li"):
+                        svc = li.get_text(strip=True)
+                        if 3 < len(svc) < 100:
+                            services.append(svc)
+                    if not services:
+                        for p in parent.find_all("p"):
+                            svc = p.get_text(strip=True)
+                            if 5 < len(svc) < 120:
+                                services.append(svc)
+
+        # Also try /services and /about pages
+        for sub_path in ["/services", "/about"]:
+            try:
+                sub_resp = ext_requests.get(url.rstrip("/") + sub_path,
+                                            headers=headers, timeout=10, verify=False)
+                if sub_resp.status_code == 200:
+                    sub_soup = BS(sub_resp.text, "lxml")
+                    for li in sub_soup.find_all("li"):
+                        svc = li.get_text(strip=True)
+                        if 3 < len(svc) < 100 and svc not in services:
+                            services.append(svc)
+                    if not services:
+                        for h in sub_soup.find_all(["h2", "h3", "h4"]):
+                            svc = h.get_text(strip=True)
+                            if 3 < len(svc) < 80 and svc not in services:
+                                services.append(svc)
+            except Exception:
+                pass
+
+        # Deduplicate and limit
+        seen = set()
+        unique_services = []
+        for s in services:
+            sl = s.lower().strip()
+            if sl not in seen and len(sl) > 3:
+                seen.add(sl)
+                unique_services.append(s)
+        services = unique_services[:15]
+
+        # If no services found, try to extract from all page text
+        if not services and description:
+            services = [s.strip() for s in description.split(",") if 3 < len(s.strip()) < 60][:8]
+
+        return jsonify({
+            "company_name": company_name,
+            "description": description,
+            "services": services,
+            "url": url,
+        })
+    except Exception as e:
+        log.error(f"Website scan error: {e}")
+        return jsonify({"error": f"Could not scan website: {str(e)}", "services": [], "description": ""}), 200
+
+
+@app.route("/api/email-outreach/generate", methods=["POST"])
+@subscription_required
+def api_generate_email_templates():
+    """
+    Generate personalised email templates for a batch of leads.
+    Uses rule-based template engine — no external AI API required.
+    """
+    data = request.get_json()
+    sender = data.get("sender", {})
+    leads = data.get("leads", [])
+
+    if not leads:
+        return jsonify({"error": "No leads provided."}), 400
+
+    sender_name = sender.get("name", "there")
+    sender_company = sender.get("company", "our company")
+    sender_website = sender.get("website", "")
+    sender_desc = sender.get("description", "")
+    outreach_type = sender.get("outreach_type", "agency")
+    website_scan = sender.get("website_scan") or {}
+    scanned_services = website_scan.get("services", [])
+
+    # Build a service summary
+    if scanned_services:
+        svc_text = ", ".join(scanned_services[:5])
+    elif sender_desc:
+        svc_text = sender_desc[:200]
+    else:
+        svc_text = "our professional services"
+
+    templates = []
+    uid = session["user_id"]
+    db = get_db()
+
+    for lead in leads:
+        biz = lead.get("title") or lead.get("data", {}).get("business_name") or "your business"
+        lead_email = lead.get("email", "")
+        lead_location = lead.get("location", "")
+        lead_keyword = lead.get("keyword", "")
+        lead_website = lead.get("website", "")
+        lead_phone = lead.get("phone", "")
+        lead_id = lead.get("lead_id")
+        lead_data = lead.get("data", {})
+
+        # Build personalised template
+        subject, body = _build_email_template(
+            sender_name=sender_name,
+            sender_company=sender_company,
+            sender_website=sender_website,
+            sender_desc=sender_desc,
+            svc_text=svc_text,
+            outreach_type=outreach_type,
+            biz_name=biz,
+            lead_email=lead_email,
+            lead_location=lead_location,
+            lead_keyword=lead_keyword,
+            lead_website=lead_website,
+            lead_data=lead_data,
+        )
+
+        tpl = {
+            "business_name": biz,
+            "email": lead_email,
+            "subject": subject,
+            "body": body,
+            "location": lead_location,
+            "keyword": lead_keyword,
+        }
+        templates.append(tpl)
+
+        # Persist to DB
+        try:
+            db.execute(
+                "INSERT INTO email_templates "
+                "(user_id, lead_id, business_name, email, subject, body, keyword, location, sender_info) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, lead_id, biz, lead_email, subject, body,
+                 lead_keyword, lead_location, json.dumps(sender, default=str)),
+            )
+        except Exception as e:
+            log.error(f"Template persist error: {e}")
+
+    db.commit()
+
+    return jsonify({"templates": templates, "count": len(templates)})
+
+
+@app.route("/api/email-outreach/templates")
+@login_required
+def api_list_email_templates():
+    """List saved email templates for the current user."""
+    uid = session["user_id"]
+    db = get_db()
+    page = request.args.get("page", 1, type=int)
+    per_page = request.args.get("per_page", 50, type=int)
+    offset = (page - 1) * per_page
+
+    total = db.execute(
+        "SELECT COUNT(*) FROM email_templates WHERE user_id=?", (uid,)
+    ).fetchone()[0]
+
+    rows = db.execute(
+        "SELECT * FROM email_templates WHERE user_id=? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        (uid, per_page, offset),
+    ).fetchall()
+
+    templates = []
+    for r in rows:
+        templates.append({
+            "id": r["id"],
+            "lead_id": r["lead_id"],
+            "business_name": r["business_name"],
+            "email": r["email"],
+            "subject": r["subject"],
+            "body": r["body"],
+            "keyword": r["keyword"],
+            "location": r["location"],
+            "created_at": r["created_at"],
+        })
+
+    return jsonify({"templates": templates, "total": total, "page": page})
+
+
+def _build_email_template(*, sender_name, sender_company, sender_website,
+                           sender_desc, svc_text, outreach_type,
+                           biz_name, lead_email, lead_location, lead_keyword,
+                           lead_website, lead_data):
+    """
+    Build a personalised cold outreach email using rule-based templates.
+    Returns (subject, body).
+    """
+    import random as _rng
+
+    # --- Location / niche personalisation tokens ---
+    loc_phrase = f" in {lead_location}" if lead_location else ""
+    niche_phrase = lead_keyword or "your industry"
+    biz_short = biz_name if biz_name != "your business" else "your company"
+    website_line = f"\nYou can learn more about what we do at {sender_website}" if sender_website else ""
+
+    # --- Subject line variants (randomly picked for variety) ---
+    subjects_agency = [
+        f"Quick idea for {biz_short}",
+        f"Helping {niche_phrase} businesses{loc_phrase} grow",
+        f"Partnership opportunity for {biz_short}",
+        f"{sender_company} × {biz_short} — a quick thought",
+        f"Grow {biz_short} with proven {niche_phrase} strategies",
+    ]
+    subjects_saas = [
+        f"A tool built for {niche_phrase} businesses like {biz_short}",
+        f"Save hours every week at {biz_short}",
+        f"Quick demo for {biz_short}?",
+        f"{sender_company} for {niche_phrase} businesses{loc_phrase}",
+        f"Automate and scale {biz_short}",
+    ]
+    subjects_freelance = [
+        f"Can I help {biz_short} with {niche_phrase}?",
+        f"Freelance {niche_phrase} expert — quick intro",
+        f"Let's work together, {biz_short}",
+        f"Ideas for {biz_short}{loc_phrase}",
+    ]
+    subjects_consulting = [
+        f"Strategic growth ideas for {biz_short}",
+        f"Consulting opportunity — {biz_short}",
+        f"Unlock growth for {biz_short}{loc_phrase}",
+        f"{niche_phrase} insights for {biz_short}",
+    ]
+
+    type_subjects = {
+        "agency": subjects_agency,
+        "saas": subjects_saas,
+        "freelance": subjects_freelance,
+        "consulting": subjects_consulting,
+    }
+    subject = _rng.choice(type_subjects.get(outreach_type, subjects_agency))
+
+    # --- Body templates ---
+    # Agency body
+    if outreach_type == "agency":
+        body = (
+            f"Hi {{first_contact}},\n\n"
+            f"I came across {biz_short}{loc_phrase} and was impressed by what you've built in the {niche_phrase} space.\n\n"
+            f"I'm {sender_name} from {sender_company}. We specialise in {svc_text}, "
+            f"and we've helped other {niche_phrase} businesses{loc_phrase} increase their online presence and generate more leads.\n\n"
+            f"I had a few ideas specifically for {biz_short} that I think could make a real impact — "
+            f"would you be open to a quick 10-minute call this week?"
+            f"{website_line}\n\n"
+            f"Looking forward to connecting.\n\n"
+            f"Best regards,\n{sender_name}\n{sender_company}"
+        )
+    elif outreach_type == "saas":
+        body = (
+            f"Hi {{first_contact}},\n\n"
+            f"I noticed {biz_short}{loc_phrase} is doing great work in {niche_phrase}. "
+            f"I wanted to share a tool we've built at {sender_company} that's helping similar businesses save time and scale faster.\n\n"
+            f"In short, {svc_text}.\n\n"
+            f"Businesses like yours{loc_phrase} are already using it to streamline operations and boost results. "
+            f"I'd love to offer you a free demo or trial so you can see the value first-hand."
+            f"{website_line}\n\n"
+            f"Would you be interested in a quick walkthrough?\n\n"
+            f"Cheers,\n{sender_name}\n{sender_company}"
+        )
+    elif outreach_type == "freelance":
+        body = (
+            f"Hi {{first_contact}},\n\n"
+            f"I found {biz_short}{loc_phrase} while researching {niche_phrase} businesses, "
+            f"and I think there's a great opportunity to enhance what you're already doing really well.\n\n"
+            f"I'm {sender_name}, a freelance specialist in {svc_text}. "
+            f"I've worked with a number of {niche_phrase} businesses and consistently delivered measurable results.\n\n"
+            f"I'd love to share a couple of tailored ideas for {biz_short} — no strings attached. "
+            f"Would you be open to a brief chat?"
+            f"{website_line}\n\n"
+            f"Best,\n{sender_name}"
+        )
+    else:  # consulting
+        body = (
+            f"Hi {{first_contact}},\n\n"
+            f"I've been studying the {niche_phrase} landscape{loc_phrase} and {biz_short} stood out "
+            f"as a business with strong potential for accelerated growth.\n\n"
+            f"At {sender_company}, we provide strategic consulting in {svc_text}. "
+            f"We've helped businesses similar to yours unlock new revenue streams and optimise operations.\n\n"
+            f"I'd welcome the chance to share a few actionable insights tailored to {biz_short}. "
+            f"Could we schedule a short call this week?"
+            f"{website_line}\n\n"
+            f"Warm regards,\n{sender_name}\n{sender_company}"
+        )
+
+    # Replace {first_contact} placeholder with a best-guess first name
+    contact_name = ""
+    if lead_data:
+        contact_name = (
+            lead_data.get("owner_name") or lead_data.get("name")
+            or lead_data.get("display_name") or lead_data.get("contact_name") or ""
+        )
+    if contact_name:
+        first_name = contact_name.strip().split()[0]
+    else:
+        first_name = "there"
+    body = body.replace("{first_contact}", first_name)
+
+    return subject, body
 
 
 # ============================================================

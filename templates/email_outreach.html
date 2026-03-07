@@ -1,0 +1,440 @@
+{% extends "base.html" %} {% block title %}LeadGen — Email Outreach{% endblock
+%} {% block topbar_title %}
+<h5 class="mb-0 fw-bold">Email Outreach</h5>
+{% endblock %} {% block content %}
+
+<!-- Step Indicator -->
+<div class="outreach-steps mb-4">
+  <div class="step-item active" data-step="1">
+    <div class="step-num">1</div>
+    <span>Your Business</span>
+  </div>
+  <div class="step-line"></div>
+  <div class="step-item" data-step="2">
+    <div class="step-num">2</div>
+    <span>Select Leads</span>
+  </div>
+  <div class="step-line"></div>
+  <div class="step-item" data-step="3">
+    <div class="step-num">3</div>
+    <span>Generate</span>
+  </div>
+  <div class="step-line"></div>
+  <div class="step-item" data-step="4">
+    <div class="step-num">4</div>
+    <span>Templates</span>
+  </div>
+</div>
+
+<!-- ═══════════ STEP 1: Sender Business Details ═══════════ -->
+<div id="step1" class="outreach-step">
+  <div class="tool-form-card">
+    <div class="tool-header mb-3">
+      <h2>
+        <i class="bi bi-building me-2" style="color: #4f8cff"></i>Your Business
+        Details
+      </h2>
+      <p>
+        Tell us about your business so we can create personalised outreach
+        emails
+      </p>
+    </div>
+
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label"
+          ><i class="bi bi-person me-1"></i>Your Name</label
+        >
+        <input
+          type="text"
+          class="form-control"
+          id="senderName"
+          placeholder="e.g. John Smith"
+        />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label"
+          ><i class="bi bi-briefcase me-1"></i>Company Name</label
+        >
+        <input
+          type="text"
+          class="form-control"
+          id="senderCompany"
+          placeholder="e.g. Acme Marketing Agency"
+        />
+      </div>
+      <div class="col-md-6">
+        <label class="form-label"
+          ><i class="bi bi-globe me-1"></i>Company Website</label
+        >
+        <input
+          type="url"
+          class="form-control"
+          id="senderWebsite"
+          placeholder="https://yourcompany.com"
+        />
+        <div class="form-text">
+          We'll scan your website to understand your services
+        </div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label"
+          ><i class="bi bi-tag me-1"></i>Outreach Type</label
+        >
+        <select class="form-select" id="outreachType">
+          <option value="agency">Agency Services</option>
+          <option value="saas">SaaS Product</option>
+          <option value="freelance">Freelance Services</option>
+          <option value="consulting">Consulting</option>
+        </select>
+      </div>
+      <div class="col-12">
+        <label class="form-label"
+          ><i class="bi bi-card-text me-1"></i>Business Description / Services
+          Offered</label
+        >
+        <textarea
+          class="form-control"
+          id="senderDescription"
+          rows="3"
+          placeholder="Briefly describe your services, tools, or products. E.g. 'We offer SEO, web design, and social media management for small businesses.'"
+        ></textarea>
+      </div>
+    </div>
+
+    <!-- Website Scan Result -->
+    <div id="websiteScanResult" class="mt-3" style="display: none">
+      <div
+        class="alert alert-info d-flex align-items-start gap-2 border-0"
+        style="background: rgba(79, 140, 255, 0.08)"
+      >
+        <i class="bi bi-info-circle-fill mt-1" style="color: #4f8cff"></i>
+        <div>
+          <strong>Website Analysis</strong>
+          <div id="websiteScanDetails" class="mt-1 small"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex justify-content-between mt-4">
+      <div></div>
+      <button class="btn btn-primary px-4" id="btnScanAndNext">
+        <span id="scanBtnText"
+          ><i class="bi bi-arrow-right me-1"></i>Scan Website & Continue</span
+        >
+        <span id="scanBtnSpinner" style="display: none">
+          <span class="spinner-border spinner-border-sm me-1"></span>Scanning...
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ STEP 2: Select Leads ═══════════ -->
+<div id="step2" class="outreach-step" style="display: none">
+  <div class="tool-form-card">
+    <div class="tool-header mb-3">
+      <h2>
+        <i class="bi bi-people-fill me-2" style="color: #22c55e"></i>Select
+        Leads
+      </h2>
+      <p>Choose which leads to create outreach templates for</p>
+    </div>
+
+    <!-- Lead Source Tabs -->
+    <ul class="nav nav-pills mb-4" id="leadSourceTabs">
+      <li class="nav-item">
+        <button
+          class="nav-link active"
+          data-source="recent"
+          onclick="switchLeadSource('recent')"
+        >
+          <i class="bi bi-clock-history me-1"></i>Recent Scrapes
+        </button>
+      </li>
+      <li class="nav-item">
+        <button
+          class="nav-link"
+          data-source="database"
+          onclick="switchLeadSource('database')"
+        >
+          <i class="bi bi-database me-1"></i>From Database
+        </button>
+      </li>
+      <li class="nav-item">
+        <button
+          class="nav-link"
+          data-source="upload"
+          onclick="switchLeadSource('upload')"
+        >
+          <i class="bi bi-upload me-1"></i>Upload CSV
+        </button>
+      </li>
+    </ul>
+
+    <!-- Recent Scrapes Source -->
+    <div id="sourceRecent" class="lead-source-panel">
+      <div class="mb-3">
+        <label class="form-label">Select a Recent Scrape Session</label>
+        <select class="form-select" id="recentScrapeSelect">
+          <option value="">Loading recent scrapes...</option>
+        </select>
+      </div>
+      <div id="recentScrapePreview" style="display: none">
+        <div class="d-flex gap-3 mb-2 flex-wrap">
+          <span class="badge bg-primary" id="recentLeadCount">0 leads</span>
+          <span class="badge bg-info" id="recentTool">-</span>
+          <span class="badge bg-secondary" id="recentKeyword">-</span>
+        </div>
+        <div
+          class="table-responsive"
+          style="max-height: 300px; overflow-y: auto"
+        >
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-dark">
+              <tr>
+                <th>
+                  <input type="checkbox" id="selectAllRecentLeads" checked />
+                </th>
+                <th>Business</th>
+                <th>Email</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody id="recentLeadsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Database Source -->
+    <div id="sourceDatabase" class="lead-source-panel" style="display: none">
+      <div class="row g-3 mb-3">
+        <div class="col-md-4">
+          <label class="form-label">Business Type</label>
+          <select class="form-select" id="dbFilterKeyword">
+            <option value="">All Keywords</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Location</label>
+          <select class="form-select" id="dbFilterLocation">
+            <option value="">All Locations</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Tool</label>
+          <select class="form-select" id="dbFilterTool">
+            <option value="">All Tools</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn btn-outline-primary btn-sm mb-3" id="btnLoadDbLeads">
+        <i class="bi bi-search me-1"></i>Load Leads
+      </button>
+      <div id="dbLeadsPreview" style="display: none">
+        <span class="badge bg-success mb-2" id="dbLeadCount">0 leads</span>
+        <div
+          class="table-responsive"
+          style="max-height: 300px; overflow-y: auto"
+        >
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-dark">
+              <tr>
+                <th><input type="checkbox" id="selectAllDbLeads" checked /></th>
+                <th>Business</th>
+                <th>Email</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody id="dbLeadsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Upload CSV Source -->
+    <div id="sourceUpload" class="lead-source-panel" style="display: none">
+      <div class="upload-zone" id="uploadZone">
+        <i
+          class="bi bi-cloud-arrow-up"
+          style="font-size: 2.5rem; color: var(--accent)"
+        ></i>
+        <p class="mt-2 mb-1 fw-semibold">Drag & drop your CSV file here</p>
+        <p class="text-muted small mb-2">
+          or click to browse. Required columns: business name, email
+        </p>
+        <input type="file" id="csvFileInput" accept=".csv" class="d-none" />
+        <button
+          class="btn btn-outline-primary btn-sm"
+          onclick="document.getElementById('csvFileInput').click()"
+        >
+          <i class="bi bi-folder2-open me-1"></i>Browse Files
+        </button>
+      </div>
+      <div id="csvPreview" style="display: none" class="mt-3">
+        <div class="d-flex align-items-center gap-2 mb-2">
+          <span class="badge bg-success" id="csvLeadCount">0 leads</span>
+          <button class="btn btn-outline-danger btn-sm" id="btnClearCsv">
+            <i class="bi bi-x-lg me-1"></i>Clear
+          </button>
+        </div>
+        <div
+          class="table-responsive"
+          style="max-height: 300px; overflow-y: auto"
+        >
+          <table class="table table-sm table-hover mb-0">
+            <thead class="table-dark">
+              <tr>
+                <th>
+                  <input type="checkbox" id="selectAllCsvLeads" checked />
+                </th>
+                <th>Business</th>
+                <th>Email</th>
+                <th>Location</th>
+              </tr>
+            </thead>
+            <tbody id="csvLeadsBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="d-flex justify-content-between mt-4">
+      <button class="btn btn-outline-secondary" onclick="goToStep(1)">
+        <i class="bi bi-arrow-left me-1"></i>Back
+      </button>
+      <button class="btn btn-primary px-4" id="btnToGenerate">
+        <i class="bi bi-arrow-right me-1"></i>Continue to Generate
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ STEP 3: Generating ═══════════ -->
+<div id="step3" class="outreach-step" style="display: none">
+  <div class="tool-form-card text-center py-5">
+    <div class="mb-4">
+      <div
+        class="spinner-border text-primary"
+        style="width: 3rem; height: 3rem"
+      ></div>
+    </div>
+    <h3 class="fw-bold mb-2">Generating Email Templates</h3>
+    <p class="text-muted mb-3">
+      Creating personalised outreach emails for each business...
+    </p>
+    <div class="progress mx-auto" style="max-width: 400px">
+      <div
+        class="progress-bar progress-bar-striped progress-bar-animated"
+        id="genProgressBar"
+        style="width: 0%"
+      ></div>
+    </div>
+    <small class="text-muted mt-2 d-block" id="genProgressMsg"
+      >Starting...</small
+    >
+  </div>
+</div>
+
+<!-- ═══════════ STEP 4: Results ═══════════ -->
+<div id="step4" class="outreach-step" style="display: none">
+  <div class="tool-form-card">
+    <div class="tool-header mb-3">
+      <h2>
+        <i class="bi bi-envelope-paper-fill me-2" style="color: #a78bfa"></i
+        >Generated Templates
+      </h2>
+      <p>Click any template to view, copy, or edit</p>
+    </div>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <span class="badge bg-success px-3 py-2" id="templateCount"
+        >0 templates</span
+      >
+      <div class="d-flex gap-2">
+        <button class="btn btn-outline-primary btn-sm" id="btnExportTemplates">
+          <i class="bi bi-download me-1"></i>Export All
+        </button>
+        <button class="btn btn-outline-secondary btn-sm" onclick="goToStep(2)">
+          <i class="bi bi-arrow-left me-1"></i>Back to Leads
+        </button>
+        <button class="btn btn-primary btn-sm" onclick="goToStep(1)">
+          <i class="bi bi-plus-lg me-1"></i>New Batch
+        </button>
+      </div>
+    </div>
+
+    <div id="templatesList" class="templates-grid"></div>
+  </div>
+</div>
+
+<!-- Template Detail Modal -->
+<div class="modal fade" id="templateModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div
+      class="modal-content"
+      style="
+        background: var(--surface-1);
+        border: 1px solid var(--border-color);
+      "
+    >
+      <div class="modal-header border-0">
+        <h5 class="modal-title fw-bold" id="modalTemplateBusiness">
+          Email Template
+        </h5>
+        <button
+          type="button"
+          class="btn-close btn-close-white"
+          data-bs-dismiss="modal"
+        ></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Subject Line</label>
+          <input type="text" class="form-control" id="modalSubject" readonly />
+        </div>
+        <div class="mb-3">
+          <label class="form-label fw-semibold">Email Body</label>
+          <textarea
+            class="form-control"
+            id="modalBody"
+            rows="12"
+            readonly
+            style="white-space: pre-wrap"
+          ></textarea>
+        </div>
+        <div class="d-flex gap-2 flex-wrap">
+          <span class="badge bg-info" id="modalLeadEmail">-</span>
+          <span class="badge bg-secondary" id="modalLeadLocation">-</span>
+          <span class="badge bg-secondary" id="modalLeadKeyword">-</span>
+        </div>
+      </div>
+      <div class="modal-footer border-0">
+        <button class="btn btn-outline-primary btn-sm" id="btnCopyTemplate">
+          <i class="bi bi-clipboard me-1"></i>Copy to Clipboard
+        </button>
+        <button
+          class="btn btn-outline-secondary btn-sm"
+          data-bs-dismiss="modal"
+        >
+          Close
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Error Display -->
+<div id="outreachError" style="display: none" class="mt-3">
+  <div class="alert alert-danger d-flex align-items-center" role="alert">
+    <i
+      class="bi bi-exclamation-triangle-fill me-2"
+      style="font-size: 1.2rem"
+    ></i>
+    <div id="outreachErrorMsg"></div>
+  </div>
+</div>
+
+{% endblock %} {% block extra_js %}
+<script src="{{ url_for('static', filename='js/email_outreach.js') }}"></script>
+{% endblock %}
