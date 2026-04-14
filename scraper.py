@@ -17,6 +17,7 @@ import os
 import re
 import time
 import math
+import hashlib
 import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -50,7 +51,6 @@ from geo.quadtree import (
     bbox_from_coordinates, build_cells_for_area, zoom_for_bbox,
 )
 from utils.keyword_expander import expand_keywords
-from utils.deduplicator import deduplicate
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -151,10 +151,11 @@ class GoogleMapsScraper:
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "en-US,en;q=0.9",
         })
+        # No retries — fail fast on unreachable sites
         adapter = HTTPAdapter(
             pool_connections=8,
             pool_maxsize=8,
-            max_retries=Retry(total=1, backoff_factor=0.05),
+            max_retries=Retry(total=0),
         )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
@@ -176,6 +177,29 @@ class GoogleMapsScraper:
     def get_partial_leads(self) -> list:
         """Return the leads collected so far (even mid-scrape)."""
         return list(self._partial_leads)
+
+    def _exact_deduplicate_leads(self, leads: list[dict]) -> list[dict]:
+        """Remove duplicates using exact hash only (name + coordinates)."""
+        seen_hashes: set[str] = set()
+        unique_leads: list[dict] = []
+
+        for lead in leads:
+            name = (lead.get("business_name") or "").strip().lower()
+            if not name or name == "unknown":
+                continue
+
+            latitude = (lead.get("latitude") or "").strip()
+            longitude = (lead.get("longitude") or "").strip()
+            key = f"{name}|{latitude}|{longitude}"
+            lead_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+            if lead_hash in seen_hashes:
+                continue
+
+            seen_hashes.add(lead_hash)
+            unique_leads.append(lead)
+
+        return unique_leads
 
     def _report_progress(self, message: str, percentage: int = -1):
         """Report progress via callback."""
@@ -757,17 +781,18 @@ class GoogleMapsScraper:
                 self._partial_leads = [asdict(l) for l in all_leads]
 
             # ========================================
-            # FINAL: Deduplicate and return
+            # FINAL: Light dedup (by exact name+address) and return
             # ========================================
             leads = [asdict(l) for l in all_leads]
             pre_dedup = len(leads)
 
+            # Exact-hash dedup only (URL slug dedup already handled in Phase 1)
             if leads:
-                leads = deduplicate(leads)
+                leads = self._exact_deduplicate_leads(leads)
                 deduped = pre_dedup - len(leads)
                 if deduped > 0:
                     self._report_progress(
-                        f"Removed {deduped} duplicates ({pre_dedup} → {len(leads)})", 95
+                        f"Removed {deduped} exact duplicates ({pre_dedup} → {len(leads)})", 95
                     )
 
             total_cells = self._area_stats.get("geo_cells_total", 0) or self._area_stats.get("total_areas", 1)
@@ -786,7 +811,7 @@ class GoogleMapsScraper:
             logger.error(f"Scraping failed: {e}")
             if 'all_leads' in dir() and all_leads:
                 leads = [asdict(l) for l in all_leads]
-                leads = deduplicate(leads)
+                leads = self._exact_deduplicate_leads(leads)
                 self._partial_leads = leads
             self._report_progress(f"Error: {str(e)}", -1)
             raise
@@ -821,12 +846,19 @@ class GoogleMapsScraper:
 
             processed = 0
             for future in as_completed(futures):
+                # Check stop FIRST — don't wait on more futures
+                if self._should_stop:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    logger.info(f"Stop requested — aborting website crawl after {processed}/{len(website_targets)}")
+                    break
+
                 processed += 1
                 lead = futures[future]
                 try:
-                    future.result(timeout=self._website_timeout_seconds + 5)
+                    # Short timeout — if one site is truly stuck, skip it
+                    future.result(timeout=self._website_timeout_seconds + 2)
                 except Exception as e:
-                    logger.warning(f"Website crawl failed for {lead.business_name} ({lead.website}): {e}")
+                    logger.debug(f"Website crawl skipped for {lead.business_name} ({lead.website}): {e}")
 
                 # Check if enrichment found anything
                 if lead.email or lead.facebook or lead.instagram:
@@ -834,16 +866,13 @@ class GoogleMapsScraper:
 
                 self._area_stats["websites_scanned"] = self._area_stats.get("websites_scanned", 0) + 1
 
-                if processed == len(website_targets) or processed % max(1, len(website_targets) // 4) == 0:
+                # Report progress frequently (every 5 websites)
+                if processed == len(website_targets) or processed % 5 == 0:
+                    pct = progress + int((processed / len(website_targets)) * (95 - progress))
                     self._report_progress(
-                        f"{label}: Websites {processed}/{len(website_targets)} (found data: {enriched_count})",
-                        progress,
+                        f"{label}: Websites {processed}/{len(website_targets)} (contacts found: {enriched_count})",
+                        min(pct, 95),
                     )
-
-                if self._should_stop:
-                    for pending in futures:
-                        pending.cancel()
-                    break
 
         logger.info(f"Phase 3 complete: {enriched_count}/{len(website_targets)} websites yielded contact data")
 
@@ -865,7 +894,7 @@ class GoogleMapsScraper:
         found_socials = {k: "" for k in SOCIAL_PATTERNS}
         deadline = time.monotonic() + self._website_timeout_seconds
         session = self._new_http_session()
-        pages_checked = 0
+        homepage_reachable = False
 
         for page_url in pages_to_check[: self._max_pages_per_website]:
             if self._should_stop:
@@ -875,16 +904,17 @@ class GoogleMapsScraper:
                 if remaining <= 0:
                     break
 
-                read_timeout = min(5.0, max(1.5, remaining))
+                # Short connect timeout (2s) to fail fast on unreachable hosts
+                read_timeout = min(4.0, max(1.0, remaining))
                 resp = session.get(
                     page_url,
-                    timeout=(3.0, read_timeout),
+                    timeout=(2.0, read_timeout),
                     allow_redirects=True,
                 )
                 if resp.status_code != 200:
                     continue
 
-                pages_checked += 1
+                homepage_reachable = True
                 text = resp.text
                 soup = BeautifulSoup(text, "lxml")
 
@@ -918,8 +948,13 @@ class GoogleMapsScraper:
                 if all_emails and all(found_socials.values()):
                     break
 
-            except requests.RequestException as e:
-                logger.debug(f"HTTP error for {page_url}: {e}")
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # Host is unreachable or too slow — skip ALL pages for this domain
+                if not homepage_reachable:
+                    logger.debug(f"Unreachable: {url} — skipping")
+                    break
+                continue
+            except requests.RequestException:
                 continue
             except Exception as e:
                 logger.debug(f"Error scraping {page_url}: {e}")

@@ -173,9 +173,6 @@ def _parse_iso_datetime(value: str) -> datetime | None:
 def _run_scrape_in_thread(job_id: str, payload: dict):
     """Background thread that runs the Google Maps scraper and updates job state."""
     def progress_callback(message: str, percent: int, snapshot: dict | None = None):
-        if is_job_stop_requested(job_id):
-            # Signal the scraper to stop
-            pass
         snapshot = snapshot or {}
         area_stats = snapshot.get("area_stats") if isinstance(snapshot.get("area_stats"), dict) else {}
         results_count = int(
@@ -211,17 +208,27 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
         )
 
         final_status = "PARTIAL" if result.get("status") == "PARTIAL" else "COMPLETED"
-        final_state = get_job_state(job_id) or {}
+
+        # Use completed results, but fall back to whatever partial data was saved
+        final_leads = result.get("leads", [])
+        existing_state = get_job_state(job_id) or {}
+        existing_leads = existing_state.get("results", [])
+
+        # Keep whichever set has more data
+        if len(existing_leads) > len(final_leads):
+            final_leads = existing_leads
+
+        final_state = existing_state
         final_state.update({
             "status": final_status,
             "progress": 100,
             "message": (
-                f"Stopped with {result.get('lead_count', 0)} leads."
+                f"Stopped with {len(final_leads)} leads."
                 if final_status == "PARTIAL"
-                else f"Done! Found {result.get('lead_count', 0)} leads."
+                else f"Done! Found {len(final_leads)} leads."
             ),
-            "results_count": int(result.get("lead_count", 0) or 0),
-            "results": result.get("leads", []),
+            "results_count": len(final_leads),
+            "results": final_leads,
             "area_stats": result.get("area_stats", {}),
             "finished_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
@@ -230,13 +237,20 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
 
     except Exception as exc:
         log.error(f"Scrape job {job_id} failed: {exc}")
+        # On failure, preserve whatever partial results we have
         failed_state = get_job_state(job_id) or {}
+        existing_leads = failed_state.get("results", [])
         failed_state.update({
-            "status": "FAILED",
-            "message": f"Error: {str(exc)}",
+            "status": "PARTIAL" if existing_leads else "FAILED",
+            "progress": 100,
+            "message": (
+                f"Error occurred but saved {len(existing_leads)} leads."
+                if existing_leads
+                else f"Error: {str(exc)}"
+            ),
             "error": str(exc),
-            "updated_at": datetime.utcnow().isoformat(),
             "finished_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
         })
         save_job_state(job_id, failed_state)
 
@@ -1593,8 +1607,7 @@ def job_results(job_id):
     if state:
         lifecycle = str(state.get("status", "PENDING")).upper()
         leads = state.get("results", [])
-        if lifecycle not in ("COMPLETED", "PARTIAL") and not leads:
-            return jsonify({"error": "Job not completed yet.", "status": lifecycle}), 400
+        # Return results at ANY stage — partial or complete
         return jsonify({
             "leads": leads,
             "total": len(leads),
@@ -1606,8 +1619,6 @@ def job_results(job_id):
     job = scraping_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped"):
-        return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
     return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
 
 
@@ -1615,10 +1626,9 @@ def job_results(job_id):
 def download_csv(job_id):
     queue_state = get_job_state(job_id)
     if queue_state:
-        lifecycle = str(queue_state.get("status", "PENDING")).upper()
         leads = queue_state.get("results", [])
-        if lifecycle not in ("COMPLETED", "PARTIAL") or not leads:
-            return jsonify({"error": "No data available for download."}), 400
+        if not leads:
+            return jsonify({"error": "No data available for download yet."}), 400
 
         output = io.StringIO()
         fieldnames = [
