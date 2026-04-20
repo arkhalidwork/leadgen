@@ -6,6 +6,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
+ENV GUNICORN_WORKERS=2
+ENV GUNICORN_THREADS=4
+ENV GUNICORN_TIMEOUT=300
 
 # Install Chromium (works on both amd64 AND arm64 — required for Oracle Cloud ARM)
 # Also installs matching chromedriver so Selenium can find it automatically
@@ -75,12 +78,4 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
-CMD ["gunicorn", \
-     "--bind", "0.0.0.0:5000", \
-     "--workers", "2", \
-     "--threads", "4", \
-     "--timeout", "300", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
-     "--log-level", "info", \
-     "app:app"]
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:5000 --workers ${GUNICORN_WORKERS} --threads ${GUNICORN_THREADS} --timeout ${GUNICORN_TIMEOUT} --access-logfile - --error-logfile - --log-level info app:app"]

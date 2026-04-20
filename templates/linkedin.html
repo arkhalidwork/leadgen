@@ -7,7 +7,7 @@
 <div class="tool-form-card">
   <div class="tool-header mb-3">
     <h2>
-      <i class="bi bi-linkedin me-2" style="color: #0a66c2"></i>LinkedIn Scraper
+      <i class="bi bi-linkedin me-2 tool-icon-linkedin"></i>LinkedIn Scraper
     </h2>
     <p>Find LinkedIn profiles and companies by niche &amp; location</p>
   </div>
@@ -48,9 +48,8 @@
       </div>
       <button
         type="submit"
-        class="btn btn-primary btn-lg btn-go"
+        class="btn btn-primary btn-lg btn-go btn-go-linkedin"
         id="btnScrape"
-        style="background: linear-gradient(135deg, #0a66c2, #0077b5)"
       >
         <i class="bi bi-rocket-takeoff me-1"></i>Go
       </button>
@@ -67,28 +66,19 @@
 </div>
 
 <!-- Progress Section -->
-<div class="tool-progress-card" id="progressSection" style="display: none">
+<div class="tool-progress-card is-hidden" id="progressSection">
   <div
     class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
   >
-    <h5 class="mb-0 fw-bold" style="font-size: 0.95rem">
+    <h5 class="mb-0 fw-bold tool-title-compact">
       <span
-        class="spinner-border spinner-border-sm me-2"
-        style="color: #0a66c2"
+        class="spinner-border spinner-border-sm me-2 tool-spinner-linkedin"
         id="progressSpinner"
       ></span>
       <span id="progressTitle">Scraping in progress...</span>
     </h5>
     <div class="d-flex align-items-center gap-3">
-      <span
-        class="badge px-3 py-2"
-        id="elapsedTimer"
-        style="
-          background: var(--surface-2);
-          font-family: monospace;
-          font-size: 0.88rem;
-        "
-      >
+      <span class="badge px-3 py-2 tool-elapsed-badge" id="elapsedTimer">
         <i class="bi bi-clock me-1"></i>00:00:00
       </span>
       <button
@@ -102,48 +92,43 @@
   </div>
   <div class="progress mb-2">
     <div
-      class="progress-bar progress-bar-striped progress-bar-animated"
+      class="progress-bar progress-bar-striped progress-bar-animated progress-bar-initial progress-bar-linkedin"
       id="progressBar"
       role="progressbar"
-      style="width: 0%; background: linear-gradient(90deg, #0a66c2, #0077b5)"
     ></div>
   </div>
   <small class="text-muted" id="progressMessage">Starting...</small>
-  <div class="d-flex gap-2 mt-3 flex-wrap" id="liveStats" style="display: none">
+  <div class="d-flex gap-2 mt-3 flex-wrap is-hidden" id="liveStats">
     <div class="live-stat-box">
-      <div class="stat-val" style="color: #0a66c2" id="statQueries">0 / 0</div>
+      <div class="stat-val live-stat-accent-linkedin" id="statQueries">
+        0 / 0
+      </div>
       <div class="stat-label">Queries</div>
     </div>
     <div class="live-stat-box">
-      <div class="stat-val" style="color: #22c55e" id="statLeads">0</div>
+      <div class="stat-val live-stat-accent-success" id="statLeads">0</div>
       <div class="stat-label">Leads</div>
     </div>
     <div class="live-stat-box">
-      <div class="stat-val" style="color: #06b6d4" id="statParsed">&mdash;</div>
+      <div class="stat-val live-stat-accent-cyan" id="statParsed">&mdash;</div>
       <div class="stat-label">Parsed</div>
     </div>
   </div>
 </div>
 
 <!-- Results Section -->
-<div id="resultsSection" style="display: none">
+<div id="resultsSection" class="is-hidden">
   <div class="tool-results-header">
-    <h4 class="mb-0 fw-bold" style="font-size: 1.05rem">
+    <h4 class="mb-0 fw-bold tool-results-title">
       <i class="bi bi-table me-2"></i>Results
-      <span
-        class="badge ms-2"
-        id="resultCount"
-        style="background: linear-gradient(135deg, #0a66c2, #0077b5)"
-        >0</span
-      >
+      <span class="badge ms-2 badge-gradient-linkedin" id="resultCount">0</span>
     </h4>
     <div class="d-flex gap-2 flex-wrap">
       <input
         type="text"
-        class="form-control form-control-sm"
+        class="form-control form-control-sm ui-w-200"
         id="filterInput"
         placeholder="Filter results..."
-        style="width: 200px"
       />
       <button class="btn btn-success btn-sm" id="btnDownload">
         <i class="bi bi-download me-1"></i>Download CSV
@@ -170,11 +155,7 @@
       </table>
     </div>
   </div>
-  <div
-    class="tool-results-card mt-3"
-    id="companiesTableCard"
-    style="display: none"
-  >
+  <div class="tool-results-card mt-3 is-hidden" id="companiesTableCard">
     <div class="table-responsive">
       <table class="table table-hover mb-0">
         <thead class="table-dark">
@@ -194,12 +175,9 @@
   </div>
 </div>
 
-<div id="errorSection" style="display: none">
+<div id="errorSection" class="is-hidden">
   <div class="alert alert-danger d-flex align-items-center" role="alert">
-    <i
-      class="bi bi-exclamation-triangle-fill me-2"
-      style="font-size: 1.2rem"
-    ></i>
+    <i class="bi bi-exclamation-triangle-fill me-2 tool-error-icon"></i>
     <div id="errorMessage"></div>
   </div>
 </div>

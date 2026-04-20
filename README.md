@@ -1,100 +1,90 @@
-# LeadGen — Google Maps Lead Generator
+# LeadGen
 
-A web application that scrapes Google Maps to generate business leads. Enter a keyword and location, and the tool will find businesses, extract their contact details, and export everything as a clean CSV file.
+LeadGen is a Flask-based lead generation platform with multiple acquisition tools (Google Maps, LinkedIn, Instagram, Web Crawler), durable Google Maps session orchestration, operational diagnostics, and production-ready container deployment.
 
-## Features
+## Highlights
 
-- **Web Interface** — Clean dark-themed UI to enter search parameters
-- **Google Maps Scraping** — Automated Selenium-based scraping with full scroll loading
-- **Real-time Progress** — Live progress bar and status updates while scraping
-- **Data Cleaning** — Deduplication and formatting of scraped data
-- **CSV Export** — Download results as a CSV with business name, owner, phone, website, address, rating, reviews, and category
-- **Stop/Resume** — Cancel a running job at any time
-- **Filter Results** — Search and filter results in the browser
+- Multi-tool lead collection with unified dashboard and database
+- Durable Google Maps session lifecycle (events, tasks, chunk checkpoints)
+- Queue-separated worker pools (extract vs contacts) with backpressure and per-user quotas
+- Optional PostgreSQL mirror path for orchestration durability
+- Ops observability APIs (dashboard, health, alerts, diagnostics, auto-recovery)
+- UI continuity system (shared design primitives and consistent action/state affordances)
 
 ## Prerequisites
 
-- **Python 3.10+**
-- **Google Chrome** browser installed
-- ChromeDriver is installed automatically via `webdriver-manager`
+- Python 3.10+
+- Google Chrome or Chromium
+- Virtual environment support (`venv`)
 
-## Setup
+## Local setup
 
 ```bash
-# 1. Navigate to project directory
 cd LeadGen
-
-# 2. Create a virtual environment
 python3 -m venv venv
 source venv/bin/activate
-
-# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
-## Usage
+## Run (macOS/Linux)
 
 ```bash
-# Start the web server
-python app.py
-
-# Or start the complete stack (Redis check + Celery worker + Flask)
 ./run_app.sh
+```
 
-# Windows (Command Prompt)
+## Run (Windows)
+
+```bat
 run_app.bat
 ```
 
-Open your browser to **http://localhost:5000**
+App URL: http://localhost:5000
 
-1. Enter a **business type / keyword** (e.g., "restaurants", "dentists", "plumbers")
-2. Enter a **location** (e.g., "New York", "London", "Mumbai")
-3. Click **Go** — the scraper will search Google Maps for `{keyword} in {place}`
-4. Watch the progress bar as it scrolls through results and scrapes each listing
-5. View results in the table, filter them, and **Download CSV**
+## Docker run
 
-## Output CSV Columns
-
-| Column        | Description                     |
-| ------------- | ------------------------------- |
-| Business Name | Name of the business            |
-| Owner Name    | Owner/proprietor (if available) |
-| Phone         | Phone number                    |
-| Website       | Business website URL            |
-| Address       | Full address                    |
-| Rating        | Google Maps rating (1-5)        |
-| Reviews       | Number of reviews               |
-| Category      | Business category               |
-
-## Project Structure
-
-```
-LeadGen/
-├── app.py                 # Flask backend & API routes
-├── scraper.py             # Google Maps scraper module
-├── requirements.txt       # Python dependencies
-├── templates/
-│   └── index.html         # Frontend HTML template
-├── static/
-│   ├── css/
-│   │   └── style.css      # Custom styles
-│   └── js/
-│       └── app.js         # Frontend logic
-├── output/                # Generated CSV files
-└── README.md
+```bash
+docker compose up -d --build
 ```
 
-## API Endpoints
+- App: http://localhost:5000
+- App health: http://localhost:5000/health
+- Ops health: http://localhost:5000/health/ops
 
-| Method | Endpoint             | Description           |
-| ------ | -------------------- | --------------------- |
-| GET    | `/`                  | Main web interface    |
-| POST   | `/api/scrape`        | Start a scraping job  |
-| GET    | `/api/status/<id>`   | Check job progress    |
-| GET    | `/api/results/<id>`  | Get completed results |
-| GET    | `/api/download/<id>` | Download CSV          |
-| POST   | `/api/stop/<id>`     | Stop a running job    |
+## Core runtime env vars
 
-## Disclaimer
+- `LEADGEN_SECRET_KEY` (required in production)
+- `LEADGEN_DB_PATH` (default SQLite path)
+- `LEADGEN_OUTPUT_DIR` (CSV output path)
+- `LEADGEN_POSTGRES_DSN` (optional PostgreSQL mirror enablement)
+- `LEADGEN_EXTRACT_WORKERS`, `LEADGEN_CONTACT_WORKERS`
+- `LEADGEN_EXTRACT_MAX_PENDING`, `LEADGEN_CONTACT_MAX_PENDING`
+- `LEADGEN_EXTRACT_PER_USER_ACTIVE_LIMIT`, `LEADGEN_CONTACT_PER_USER_ACTIVE_LIMIT`
+- `LEADGEN_QUEUE_PENDING_TTL_SECONDS`
+- `LEADGEN_AUTO_STALE_SWEEP`, `LEADGEN_AUTO_SWEEP_INTERVAL_SECONDS`, `LEADGEN_AUTO_SWEEP_STALE_SECONDS`
+- `LEADGEN_RETENTION_ENABLED`, `LEADGEN_RETENTION_INTERVAL_SECONDS`
+- `LEADGEN_RETENTION_EVENTS_DAYS`, `LEADGEN_RETENTION_LOGS_DAYS`, `LEADGEN_RETENTION_TASKS_DAYS`
 
-This tool is intended for **educational and authorized use only**. Always respect Google's Terms of Service and robots.txt. Use responsibly and ensure compliance with all applicable laws and regulations regarding web scraping and data collection.
+## Key Google Maps ops endpoints
+
+- `GET /api/gmaps/ops/dashboard`
+- `GET /api/gmaps/ops/metrics`
+- `GET /api/gmaps/ops/health`
+- `GET /api/gmaps/ops/alerts`
+- `GET /api/gmaps/sessions/<job_id>/diagnostics`
+- `POST /api/gmaps/sessions/<job_id>/recover-auto`
+- `GET /api/gmaps/worker-pools`
+
+## Project structure (abridged)
+
+- `app.py` — Flask app, orchestration, APIs
+- `scraper.py`, `linkedin_scraper.py`, `instagram_scraper.py`, `web_crawler.py`
+- `task_queue/dispatcher.py` — queue pools and backpressure
+- `task_queue/postgres_mirror.py` — optional PostgreSQL mirror
+- `templates/`, `static/` — UI
+- `workers/` — worker runtime helpers
+- `docker-compose.yml`, `Dockerfile` — container deployment
+
+## Notes
+
+- Google Maps scraping behavior depends on target-site dynamics and anti-bot controls.
+- Use responsibly and in compliance with platform terms, laws, and privacy requirements.

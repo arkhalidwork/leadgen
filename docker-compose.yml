@@ -11,6 +11,7 @@ services:
       - .env
     environment:
       - LEADGEN_DB_PATH=/app/data/leadgen.db
+      - LEADGEN_POSTGRES_DSN=${LEADGEN_POSTGRES_DSN:-postgresql://leadgen:leadgen@postgres:5432/leadgen}
       - LEADGEN_OUTPUT_DIR=/app/output
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
@@ -31,7 +32,27 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: leadgen-postgres
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-leadgen}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-leadgen}
+      - POSTGRES_DB=${POSTGRES_DB:-leadgen}
+    volumes:
+      - leadgen-postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   leadgen-output:
   leadgen-data:
+  leadgen-postgres:

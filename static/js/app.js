@@ -11,6 +11,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const btnScrape = document.getElementById("btnScrape");
   const btnStop = document.getElementById("btnStop");
   const btnDownload = document.getElementById("btnDownload");
+  const btnStartContacts = document.getElementById("btnStartContacts");
   const mapContainer = document.getElementById("mapSelector");
   const mapSection = document.getElementById("mapSectionWrapper");
   const btnUseMapSelection = document.getElementById("btnUseMapSelection");
@@ -30,6 +31,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const filterInput = document.getElementById("filterInput");
   const errorSection = document.getElementById("errorSection");
   const errorMessage = document.getElementById("errorMessage");
+  const leadLimitRange = document.getElementById("leadLimitRange");
+  const leadLimitValue = document.getElementById("leadLimitValue");
+  const progressLogs = document.getElementById("progressLogs");
 
   // Timer & live stats elements
   const elapsedTimer = document.getElementById("elapsedTimer");
@@ -48,6 +52,8 @@ document.addEventListener("DOMContentLoaded", () => {
   let sortColumn = null;
   let sortDirection = "asc";
   let liveLeadsRendered = false;
+  let latestPhase = "extract";
+  let latestContactsStatus = "pending";
 
   // Timer
   let timerInterval = null;
@@ -197,9 +203,9 @@ document.addEventListener("DOMContentLoaded", () => {
       zoomControl: true,
     }).setView([25.2048, 55.2708], 10);
 
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    L.tileLayer("https://mt1.google.com/vt/lyrs=m&hl=en&x={x}&y={y}&z={z}", {
       maxZoom: 19,
-      attribution: "&copy; OpenStreetMap contributors",
+      attribution: "&copy; Google",
     }).addTo(map);
 
     drawnItems = new L.FeatureGroup();
@@ -262,6 +268,32 @@ document.addEventListener("DOMContentLoaded", () => {
 
   keywordInput.addEventListener("input", updatePreview);
   placeInput.addEventListener("input", updatePreview);
+
+  function updateLeadLimitLabel() {
+    if (!leadLimitRange || !leadLimitValue) return;
+    const v = parseInt(leadLimitRange.value || "0", 10);
+    leadLimitValue.textContent = v > 0 ? String(v) : "Max";
+  }
+  if (leadLimitRange) {
+    leadLimitRange.addEventListener("input", updateLeadLimitLabel);
+    updateLeadLimitLabel();
+  }
+
+  function appendLogs(logs) {
+    if (!progressLogs || !Array.isArray(logs)) return;
+    const recent = logs.slice(-120);
+    progressLogs.innerHTML = recent
+      .map((l) => {
+        const ts = l.at ? new Date(l.at).toLocaleTimeString() : "--:--:--";
+        const pct = Number.isFinite(l.progress)
+          ? `[${Math.max(0, Math.min(100, l.progress))}%] `
+          : "";
+        return `<div>[${ts}] ${pct}${escapeHtml(l.message || "")}</div>`;
+      })
+      .join("");
+    progressLogs.scrollTop = progressLogs.scrollHeight;
+  }
+
   initMapSelector();
 
   // Form submit
@@ -293,6 +325,10 @@ document.addEventListener("DOMContentLoaded", () => {
           keyword,
           place,
           map_selection: selectedMapArea,
+          max_leads:
+            leadLimitRange && parseInt(leadLimitRange.value || "0", 10) > 0
+              ? parseInt(leadLimitRange.value || "0", 10)
+              : null,
         }),
       });
 
@@ -321,7 +357,10 @@ document.addEventListener("DOMContentLoaded", () => {
     try {
       const res = await fetch(`/api/stop/${currentJobId}`, { method: "POST" });
       await res.json();
-      progressTitle.textContent = "Stopped — saving results...";
+      progressTitle.textContent =
+        latestPhase === "contacts"
+          ? "Pause requested for contact retrieval..."
+          : "Stopped — saving results...";
       progressSpinner.style.display = "none";
       progressBar.classList.remove("progress-bar-animated");
       await loadLiveResults();
@@ -374,6 +413,32 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  if (btnStartContacts) {
+    btnStartContacts.addEventListener("click", async () => {
+      if (!currentJobId) return;
+      btnStartContacts.disabled = true;
+      btnStartContacts.innerHTML =
+        '<span class="spinner-border spinner-border-sm me-1"></span>Starting...';
+      try {
+        const res = await fetch(`/api/gmaps/contacts/start/${currentJobId}`, {
+          method: "POST",
+        });
+        const data = await res.json();
+        if (!res.ok)
+          throw new Error(data.error || "Failed to start contact retrieval.");
+        showProgress();
+        progressTitle.textContent = "Contact retrieval in progress...";
+        startPolling();
+      } catch (err) {
+        showError(err.message);
+      } finally {
+        btnStartContacts.disabled = false;
+        btnStartContacts.innerHTML =
+          '<i class="bi bi-play-circle me-1"></i>Start Contact Retrieval';
+      }
+    });
+  }
+
   // Filter results
   filterInput.addEventListener("input", () => {
     const term = filterInput.value.toLowerCase();
@@ -386,6 +451,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Polling
   function startPolling() {
+    stopPolling();
     pollInterval = setInterval(pollStatus, 1500);
   }
 
@@ -403,8 +469,12 @@ document.addEventListener("DOMContentLoaded", () => {
       const res = await fetch(`/api/status/${currentJobId}`);
       const data = await res.json();
 
+      latestPhase = data.phase || "extract";
+      latestContactsStatus = data.contacts_status || "pending";
+
       updateProgress(data.progress, data.message);
       updateLiveStats(data);
+      appendLogs(data.logs || []);
 
       // Sync timer with server
       if (data.elapsed_seconds) {
@@ -414,12 +484,20 @@ document.addEventListener("DOMContentLoaded", () => {
       if (data.status === "completed") {
         stopPolling();
         stopTimer();
-        progressTitle.textContent = "Complete!";
+        progressTitle.textContent =
+          latestPhase === "contacts" && latestContactsStatus === "completed"
+            ? "Contact retrieval complete!"
+            : "List extraction complete!";
         progressSpinner.style.display = "none";
         progressBar.classList.remove("progress-bar-animated");
         setFormEnabled(true);
         showMapSection();
         await loadResults();
+        if (latestContactsStatus === "pending" && btnStartContacts) {
+          btnStartContacts.style.display = "";
+        } else if (btnStartContacts) {
+          btnStartContacts.style.display = "none";
+        }
       } else if (data.status === "failed") {
         stopPolling();
         stopTimer();
@@ -444,8 +522,15 @@ document.addEventListener("DOMContentLoaded", () => {
         showMapSection();
         if (data.lead_count > 0) {
           await loadResults();
+          if (btnStartContacts) btnStartContacts.style.display = "";
         }
       } else {
+        if (latestPhase === "contacts") {
+          progressTitle.textContent = "Contact retrieval in progress...";
+          if (btnStartContacts) btnStartContacts.style.display = "none";
+        } else {
+          progressTitle.textContent = "List extraction in progress...";
+        }
         if (Array.isArray(data.results) && data.results.length > 0) {
           allLeads = data.results;
           resultCount.textContent = data.results.length;
@@ -644,6 +729,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (keywordsExpanded) keywordsExpanded.style.display = "none";
     if (elapsedTimer)
       elapsedTimer.innerHTML = '<i class="bi bi-clock me-1"></i>00:00:00';
+    if (progressLogs) progressLogs.innerHTML = "";
   }
 
   function hideProgress() {

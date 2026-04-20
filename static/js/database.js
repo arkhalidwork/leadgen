@@ -29,6 +29,7 @@
   const filterLocation = $("#dbFilterLocation");
   const filterQuality = $("#dbFilterQuality");
   const applyBtn = $("#dbApplyFilters");
+  const cleanupBtn = $("#dbCleanupBtn");
   const exportBtn = $("#dbExportBtn");
   const prevBtn = $("#prevPage");
   const nextBtn = $("#nextPage");
@@ -62,6 +63,7 @@
       currentPage = 1;
       loadLeads();
     });
+    if (cleanupBtn) cleanupBtn.addEventListener("click", cleanupLeads);
     exportBtn.addEventListener("click", exportCSV);
     prevBtn.addEventListener("click", () => {
       if (currentPage > 1) {
@@ -405,6 +407,39 @@
   function exportCSV() {
     const query = buildQuery();
     window.location.href = "/api/leads/export?" + query;
+  }
+
+  async function cleanupLeads() {
+    const mode = prompt(
+      "Cleanup mode: type duplicates, outliers, or both",
+      "both",
+    );
+    if (!mode) return;
+    const normalized = mode.trim().toLowerCase();
+    if (!["duplicates", "outliers", "both"].includes(normalized)) {
+      alert("Invalid mode. Use duplicates, outliers, or both.");
+      return;
+    }
+
+    cleanupBtn.disabled = true;
+    try {
+      const res = await fetch("/api/leads/cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: normalized }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Cleanup failed");
+      alert(
+        `Cleanup complete. Removed ${data.total_removed} leads (duplicates: ${data.duplicates_removed}, outliers: ${data.outliers_removed}).`,
+      );
+      loadLeads();
+      loadStats();
+    } catch (e) {
+      alert(e.message || "Cleanup failed");
+    } finally {
+      cleanupBtn.disabled = false;
+    }
   }
 
   /* ──── helpers ──── */

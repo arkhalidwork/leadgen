@@ -1,0 +1,344 @@
+{% extends "base.html" %} {% block title %}LeadGen — Sessions{% endblock %} {%
+block topbar_title %}
+<h5 class="mb-0 fw-bold">Google Maps Sessions</h5>
+{% endblock %} {% block content %}
+<div class="tool-form-card mb-3">
+  <div
+    class="d-flex justify-content-between align-items-center flex-wrap gap-2"
+  >
+    <div>
+      <h6 class="mb-1 fw-bold">
+        <i class="bi bi-clock-history me-2"></i>Resumable Sessions
+      </h6>
+      <small class="text-muted"
+        >Track extraction and contact retrieval progress. Resume or restart
+        contact retrieval anytime.</small
+      >
+    </div>
+    <button class="btn btn-sm btn-outline-primary" id="btnRefreshSessions">
+      <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+    </button>
+  </div>
+</div>
+
+<div class="tool-form-card mb-3">
+  <div
+    class="d-flex justify-content-between align-items-center flex-wrap gap-2"
+  >
+    <div>
+      <h6 class="mb-1 fw-bold">
+        <i class="bi bi-speedometer2 me-2"></i>Ops Overview
+      </h6>
+      <small class="text-muted" id="opsSummaryText"
+        >Loading operational health and metrics...</small
+      >
+    </div>
+    <div class="d-flex align-items-center gap-2">
+      <span class="badge bg-secondary" id="opsStatusBadge">checking</span>
+      <button class="btn btn-sm btn-outline-primary" id="btnRefreshOps">
+        <i class="bi bi-arrow-repeat me-1"></i>Refresh Ops
+      </button>
+    </div>
+  </div>
+  <div class="table-responsive mt-2">
+    <table class="table table-hover mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th>Severity</th>
+          <th>Code</th>
+          <th>Message</th>
+          <th>Recommended Action</th>
+        </tr>
+      </thead>
+      <tbody id="opsAlertsBody">
+        <tr>
+          <td colspan="4" class="text-center text-muted py-3">
+            Loading alerts...
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="tool-results-card">
+  <div class="px-3 pt-2 small text-muted">
+    Tip: click a session row to open details.
+  </div>
+  <div class="table-responsive">
+    <table class="table table-hover mb-0" id="sessionsTable">
+      <thead class="table-dark">
+        <tr>
+          <th>Session</th>
+          <th>Query</th>
+          <th>Stage</th>
+          <th>Status</th>
+          <th>Leads</th>
+          <th>Completion</th>
+          <th>Updated</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="sessionsBody">
+        <tr>
+          <td colspan="8" class="text-center text-muted py-4">
+            Loading sessions...
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div
+  class="tool-results-card mt-3 session-detail-card is-hidden"
+  id="sessionDetailCard"
+>
+  <div class="session-detail-inner">
+    <div
+      class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3"
+    >
+      <h6 class="mb-0 fw-bold">
+        <i class="bi bi-list-check me-2"></i>Session Leads
+        <span id="detailSessionId" class="text-muted"></span>
+      </h6>
+      <div class="d-flex align-items-center gap-2">
+        <label for="detailCompletionFilter" class="small text-muted mb-0"
+          >Show</label
+        >
+        <select
+          id="detailCompletionFilter"
+          class="form-select form-select-sm ui-w-150"
+        >
+          <option value="all">All Leads</option>
+          <option value="complete">Complete</option>
+          <option value="incomplete">Incomplete</option>
+        </select>
+      </div>
+    </div>
+    <div class="small text-muted mb-3" id="detailSummary">—</div>
+    <div class="small mb-2" id="detailResumeAnchor"></div>
+    <div
+      class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3"
+    >
+      <div class="small mb-0" id="detailTaskHealth"></div>
+      <div class="d-flex align-items-center gap-2">
+        <button
+          class="btn btn-sm btn-outline-danger"
+          id="btnForceRetryFromAnchor"
+          type="button"
+        >
+          <i class="bi bi-exclamation-triangle me-1"></i>Force Suggested Retry
+        </button>
+        <button
+          class="btn btn-sm btn-outline-info"
+          id="btnRetryFromAnchor"
+          type="button"
+        >
+          <i class="bi bi-magic me-1"></i>Apply Suggested Recovery
+        </button>
+        <button
+          class="btn btn-sm btn-outline-warning"
+          id="btnRecoverStaleTasks"
+          type="button"
+        >
+          <i class="bi bi-wrench-adjustable-circle me-1"></i>Recover Stale Tasks
+        </button>
+        <button
+          class="btn btn-sm btn-outline-primary"
+          id="btnAutoRecoverSession"
+          type="button"
+        >
+          <i class="bi bi-cpu me-1"></i>Auto Recover Session
+        </button>
+      </div>
+    </div>
+    <div class="table-responsive session-detail-table-wrap">
+      <table class="table table-hover mb-0">
+        <thead class="table-dark">
+          <tr>
+            <th>Business</th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th>Website</th>
+          </tr>
+        </thead>
+        <tbody id="detailLeadsBody">
+          <tr>
+            <td colspan="4" class="text-center text-muted py-3">
+              Select a session to view leads.
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <details class="mt-3" id="detailTasksWrap">
+      <summary class="small fw-semibold detail-summary-toggle">
+        Task Timeline
+      </summary>
+      <div class="table-responsive session-detail-table-wrap mt-2">
+        <table class="table table-hover mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th>Task</th>
+              <th>Phase</th>
+              <th>Status</th>
+              <th>Attempts</th>
+              <th>Policy</th>
+              <th>Cooldown</th>
+              <th>Last Retry Reason</th>
+              <th>Actions</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="detailTasksBody">
+            <tr>
+              <td colspan="9" class="text-center text-muted py-3">
+                No task data loaded yet.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <details class="mt-3" id="detailLogsWrap">
+      <summary class="small fw-semibold detail-summary-toggle">
+        Realtime Session Logs
+      </summary>
+      <div id="detailLogs" class="session-detail-logs mt-2"></div>
+    </details>
+    <details class="mt-3" id="detailAuditWrap">
+      <summary class="small fw-semibold detail-summary-toggle">
+        Operator Audit Feed
+      </summary>
+      <div class="d-flex align-items-center gap-2 mt-2 mb-2 flex-wrap">
+        <label for="detailAuditScope" class="small text-muted mb-0"
+          >Scope</label
+        >
+        <select
+          id="detailAuditScope"
+          class="form-select form-select-sm ui-w-180"
+        >
+          <option value="operator">Operator Events</option>
+          <option value="recovery">Recovery Events</option>
+          <option value="all">All Events</option>
+        </select>
+        <button
+          class="btn btn-sm btn-outline-primary"
+          id="btnExportAuditReport"
+          type="button"
+        >
+          <i class="bi bi-download me-1"></i>Export Audit CSV
+        </button>
+      </div>
+      <div class="table-responsive session-detail-table-wrap">
+        <table class="table table-hover mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Severity</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody id="detailAuditBody">
+            <tr>
+              <td colspan="4" class="text-center text-muted py-3">
+                No audit events loaded yet.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <details class="mt-3" id="detailDiagnosticsWrap">
+      <summary class="small fw-semibold detail-summary-toggle">
+        Session Diagnostics
+      </summary>
+      <div class="small text-muted mt-2" id="detailDiagnosticsSummary">
+        Diagnostics unavailable.
+      </div>
+      <div class="table-responsive session-detail-table-wrap mt-2">
+        <table class="table table-hover mb-0">
+          <thead class="table-dark">
+            <tr>
+              <th>Time</th>
+              <th>Severity</th>
+              <th>Event</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody id="detailDiagnosticsIssuesBody">
+            <tr>
+              <td colspan="4" class="text-center text-muted py-3">
+                No diagnostics loaded yet.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+    <details class="mt-3 is-hidden" id="detailRetentionWrap">
+      <summary class="small fw-semibold detail-summary-toggle">
+        Retention Admin
+      </summary>
+      <div class="small text-muted mt-2" id="detailRetentionStatus">
+        Retention status unavailable.
+      </div>
+      <div class="d-flex align-items-center gap-2 mt-2 mb-2 flex-wrap">
+        <label for="retentionArchiveTable" class="small text-muted mb-0"
+          >Table</label
+        >
+        <select
+          id="retentionArchiveTable"
+          class="form-select form-select-sm ui-w-140"
+        >
+          <option value="events">Events</option>
+          <option value="logs">Logs</option>
+          <option value="tasks">Tasks</option>
+        </select>
+
+        <label for="retentionArchiveDays" class="small text-muted mb-0"
+          >Older than (days)</label
+        >
+        <input
+          id="retentionArchiveDays"
+          type="number"
+          class="form-control form-control-sm ui-w-130"
+          min="1"
+          value="30"
+        />
+
+        <label for="retentionArchiveLimit" class="small text-muted mb-0"
+          >Limit</label
+        >
+        <input
+          id="retentionArchiveLimit"
+          type="number"
+          class="form-control form-control-sm ui-w-120"
+          min="1"
+          max="20000"
+          value="5000"
+        />
+
+        <button
+          class="btn btn-sm btn-outline-primary"
+          id="btnRetentionRefresh"
+          type="button"
+        >
+          <i class="bi bi-arrow-repeat me-1"></i>Refresh Status
+        </button>
+        <button
+          class="btn btn-sm btn-outline-secondary"
+          id="btnRetentionExportArchive"
+          type="button"
+        >
+          <i class="bi bi-download me-1"></i>Export Archive CSV
+        </button>
+      </div>
+    </details>
+  </div>
+</div>
+{% endblock %} {% block extra_js %}
+<script src="{{ url_for('static', filename='js/sessions.js') }}"></script>
+{% endblock %}

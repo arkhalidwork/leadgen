@@ -161,7 +161,7 @@
   </div>
   <div class="col-6 col-md-3">
     <div class="stat-card db-stat-card border-success p-3">
-      <div class="stat-number" style="color: #22c55e" id="dbStatEmail">
+      <div class="stat-number text-quality-strong" id="dbStatEmail">
         &mdash;
       </div>
       <div class="text-muted small fw-medium">With Email</div>
@@ -169,7 +169,7 @@
   </div>
   <div class="col-6 col-md-3">
     <div class="stat-card db-stat-card border-warning p-3">
-      <div class="stat-number" style="color: #eab308" id="dbStatPhone">
+      <div class="stat-number text-quality-medium" id="dbStatPhone">
         &mdash;
       </div>
       <div class="text-muted small fw-medium">With Phone</div>
@@ -177,7 +177,7 @@
   </div>
   <div class="col-6 col-md-3">
     <div class="stat-card db-stat-card border-info p-3">
-      <div class="stat-number" style="color: #06b6d4" id="dbStatStrong">
+      <div class="stat-number live-stat-accent-cyan" id="dbStatStrong">
         &mdash;
       </div>
       <div class="text-muted small fw-medium">Strong Quality</div>
@@ -189,7 +189,7 @@
 <div class="scrape-filter-banner p-3 mb-4 d-none" id="scrapeFilterBanner">
   <div class="d-flex align-items-center justify-content-between">
     <div>
-      <i class="bi bi-funnel-fill me-2" style="color: var(--accent)"></i>
+      <i class="bi bi-funnel-fill me-2 tool-accent-icon"></i>
       <span class="fw-semibold small"
         >Viewing leads from scrape #<span id="scrapeFilterId"></span
       ></span>
@@ -207,13 +207,7 @@
     <div class="col-md-3">
       <label class="form-label small text-muted mb-1">Search</label>
       <div class="input-group input-group-sm">
-        <span
-          class="input-group-text"
-          style="
-            background: var(--surface-2);
-            border-color: var(--border-color);
-          "
-        >
+        <span class="input-group-text surface-input-addon">
           <i class="bi bi-search text-muted"></i>
         </span>
         <input
@@ -254,6 +248,13 @@
     <div class="col-md-2 d-flex gap-2">
       <button class="btn btn-sm btn-primary flex-grow-1" id="dbApplyFilters">
         <i class="bi bi-funnel-fill me-1"></i>Filter
+      </button>
+      <button
+        class="btn btn-sm btn-outline-warning"
+        id="dbCleanupBtn"
+        title="Remove duplicates and outliers"
+      >
+        <i class="bi bi-magic"></i>
       </button>
       <button
         class="btn btn-sm btn-outline-secondary"
@@ -301,7 +302,7 @@
             <th>Location</th>
             <th>Quality</th>
             <th>Date</th>
-            <th class="text-center" style="width: 60px">Actions</th>
+            <th class="text-center ui-w-60">Actions</th>
           </tr>
         </thead>
         <tbody id="leadsTableBody">
@@ -336,8 +337,7 @@
     <div class="modal-content">
       <div class="modal-header border-0 pb-0">
         <h6 class="modal-title fw-bold">
-          <i class="bi bi-person-vcard me-2" style="color: var(--accent)"></i
-          >Lead Details
+          <i class="bi bi-person-vcard me-2 tool-accent-icon"></i>Lead Details
         </h6>
         <button
           type="button"

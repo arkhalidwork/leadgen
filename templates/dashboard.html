@@ -1,48 +1,6 @@
 {% extends "base.html" %} {% block title %}LeadGen — Dashboard{% endblock %} {%
 block topbar_title %}
 <h5 class="mb-0 fw-bold">Dashboard</h5>
-{% endblock %} {% block extra_css %}
-<style>
-  .quality-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    margin-right: 8px;
-    box-shadow: 0 0 6px rgba(0, 0, 0, 0.2);
-  }
-  .quality-dot-strong {
-    background: #22c55e;
-  }
-  .quality-dot-medium {
-    background: #eab308;
-  }
-  .quality-dot-weak {
-    background: #ef4444;
-  }
-  .quality-bar {
-    height: 6px;
-    border-radius: 9999px;
-  }
-  .chart-wrap {
-    position: relative;
-  }
-  .stat-card-accent {
-    border-top: 3px solid transparent;
-  }
-  .stat-card-accent.accent-blue {
-    border-top-color: #4f8cff;
-  }
-  .stat-card-accent.accent-green {
-    border-top-color: #22c55e;
-  }
-  .stat-card-accent.accent-yellow {
-    border-top-color: #eab308;
-  }
-  .stat-card-accent.accent-red {
-    border-top-color: #ef4444;
-  }
-</style>
 {% endblock %} {% block content %}
 
 <!-- Stats Row -->
@@ -50,10 +8,7 @@ block topbar_title %}
   <div class="col-6 col-md-3">
     <div class="stat-card stat-card-accent accent-blue p-3">
       <div class="d-flex align-items-center gap-3">
-        <div
-          class="stat-icon"
-          style="background: rgba(79, 140, 255, 0.12); color: #4f8cff"
-        >
+        <div class="stat-icon stat-icon-accent-blue">
           <i class="bi bi-people-fill"></i>
         </div>
         <div>
@@ -66,14 +21,11 @@ block topbar_title %}
   <div class="col-6 col-md-3">
     <div class="stat-card stat-card-accent accent-green p-3">
       <div class="d-flex align-items-center gap-3">
-        <div
-          class="stat-icon"
-          style="background: rgba(34, 197, 94, 0.12); color: #22c55e"
-        >
+        <div class="stat-icon stat-icon-accent-green">
           <i class="bi bi-check-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number" style="color: #22c55e" id="statStrong">
+          <div class="stat-number text-quality-strong" id="statStrong">
             &mdash;
           </div>
           <div class="text-muted small fw-medium">Strong</div>
@@ -84,14 +36,11 @@ block topbar_title %}
   <div class="col-6 col-md-3">
     <div class="stat-card stat-card-accent accent-yellow p-3">
       <div class="d-flex align-items-center gap-3">
-        <div
-          class="stat-icon"
-          style="background: rgba(234, 179, 8, 0.12); color: #eab308"
-        >
+        <div class="stat-icon stat-icon-accent-yellow">
           <i class="bi bi-exclamation-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number" style="color: #eab308" id="statMedium">
+          <div class="stat-number text-quality-medium" id="statMedium">
             &mdash;
           </div>
           <div class="text-muted small fw-medium">Medium</div>
@@ -102,16 +51,11 @@ block topbar_title %}
   <div class="col-6 col-md-3">
     <div class="stat-card stat-card-accent accent-red p-3">
       <div class="d-flex align-items-center gap-3">
-        <div
-          class="stat-icon"
-          style="background: rgba(239, 68, 68, 0.12); color: #ef4444"
-        >
+        <div class="stat-icon stat-icon-accent-red">
           <i class="bi bi-x-circle-fill"></i>
         </div>
         <div>
-          <div class="stat-number" style="color: #ef4444" id="statWeak">
-            &mdash;
-          </div>
+          <div class="stat-number text-quality-weak" id="statWeak">&mdash;</div>
           <div class="text-muted small fw-medium">Weak</div>
         </div>
       </div>
@@ -126,8 +70,7 @@ block topbar_title %}
     <div class="card h-100">
       <div class="card-body p-4">
         <h6 class="fw-bold mb-3">
-          <i class="bi bi-pie-chart-fill me-2" style="color: #4f8cff"></i>Lead
-          Quality
+          <i class="bi bi-pie-chart-fill me-2 tool-accent-icon"></i>Lead Quality
         </h6>
         <div class="d-flex justify-content-center mb-3 chart-wrap">
           <canvas id="qualityChart" width="190" height="190"></canvas>
@@ -161,10 +104,10 @@ block topbar_title %}
     <div class="card h-100">
       <div class="card-body p-4">
         <h6 class="fw-bold mb-3">
-          <i class="bi bi-graph-up me-2" style="color: #4f8cff"></i>Leads
-          &mdash; Last 7 Days
+          <i class="bi bi-graph-up me-2 tool-accent-icon"></i>Leads &mdash; Last
+          7 Days
         </h6>
-        <div class="chart-wrap" style="height: 210px">
+        <div class="chart-wrap chart-wrap-md">
           <canvas id="trendChart"></canvas>
         </div>
       </div>
@@ -179,8 +122,7 @@ block topbar_title %}
     <div class="card h-100">
       <div class="card-body p-4">
         <h6 class="fw-bold mb-3">
-          <i class="bi bi-bar-chart-fill me-2" style="color: #4f8cff"></i>By
-          Tool
+          <i class="bi bi-bar-chart-fill me-2 tool-accent-icon"></i>By Tool
         </h6>
         <div class="table-responsive">
           <table class="table table-dark table-hover mb-0">
@@ -209,65 +151,51 @@ block topbar_title %}
     <div class="card h-100">
       <div class="card-body p-4">
         <h6 class="fw-bold mb-3">
-          <i class="bi bi-rocket-takeoff-fill me-2" style="color: #4f8cff"></i
-          >Quick Launch
+          <i class="bi bi-rocket-takeoff-fill me-2 tool-accent-icon"></i>Quick
+          Launch
         </h6>
         <div class="d-flex flex-column gap-2">
           <a href="/tools/google-maps" class="quick-launch-btn">
-            <div
-              class="ql-icon"
-              style="background: linear-gradient(135deg, #4285f4, #34a853)"
-            >
+            <div class="ql-icon ql-icon-gmaps">
               <i class="bi bi-geo-alt-fill"></i>
             </div>
             <div class="flex-grow-1">
               <div class="fw-bold small">Google Maps</div>
-              <div class="text-muted" style="font-size: 0.74rem">
+              <div class="text-muted text-micro">
                 Business contacts, phones, emails
               </div>
             </div>
             <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/linkedin" class="quick-launch-btn">
-            <div
-              class="ql-icon"
-              style="background: linear-gradient(135deg, #0a66c2, #0077b5)"
-            >
+            <div class="ql-icon ql-icon-linkedin">
               <i class="bi bi-linkedin"></i>
             </div>
             <div class="flex-grow-1">
               <div class="fw-bold small">LinkedIn</div>
-              <div class="text-muted" style="font-size: 0.74rem">
-                Profiles &amp; companies
-              </div>
+              <div class="text-muted text-micro">Profiles &amp; companies</div>
             </div>
             <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/instagram" class="quick-launch-btn">
-            <div
-              class="ql-icon"
-              style="background: linear-gradient(135deg, #e4405f, #c13584)"
-            >
+            <div class="ql-icon ql-icon-instagram">
               <i class="bi bi-instagram"></i>
             </div>
             <div class="flex-grow-1">
               <div class="fw-bold small">Instagram</div>
-              <div class="text-muted" style="font-size: 0.74rem">
+              <div class="text-muted text-micro">
                 Emails &amp; social profiles
               </div>
             </div>
             <i class="bi bi-chevron-right text-muted small"></i>
           </a>
           <a href="/tools/web-crawler" class="quick-launch-btn">
-            <div
-              class="ql-icon"
-              style="background: linear-gradient(135deg, #ff6b35, #f7c948)"
-            >
+            <div class="ql-icon ql-icon-webcrawler">
               <i class="bi bi-globe2"></i>
             </div>
             <div class="flex-grow-1">
               <div class="fw-bold small">Web Crawler</div>
-              <div class="text-muted" style="font-size: 0.74rem">
+              <div class="text-muted text-micro">
                 Deep-scrape websites for leads
               </div>
             </div>
@@ -284,8 +212,7 @@ block topbar_title %}
   <div class="card-body p-4">
     <div class="d-flex align-items-center justify-content-between mb-3">
       <h6 class="fw-bold mb-0">
-        <i class="bi bi-clock-history me-2" style="color: #4f8cff"></i>Recent
-        Scrapes
+        <i class="bi bi-clock-history me-2 tool-accent-icon"></i>Recent Scrapes
       </h6>
       <span
         class="badge bg-primary-subtle text-primary-emphasis"

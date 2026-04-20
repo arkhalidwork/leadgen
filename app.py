@@ -5,6 +5,7 @@ authentication, license keys, scrape history, and lead analytics.
 """
 
 import os
+import atexit
 import re
 import csv
 import io
@@ -17,6 +18,7 @@ import sqlite3
 import logging
 import threading
 import functools
+import time
 from datetime import datetime, timedelta
 
 import bcrypt
@@ -31,7 +33,22 @@ from scraper import GoogleMapsScraper, clean_leads
 from linkedin_scraper import LinkedInScraper, clean_linkedin_leads
 from instagram_scraper import InstagramScraper, clean_instagram_leads
 from web_crawler import WebCrawlerScraper, clean_web_leads
-from task_queue.job_store import save_job_state, get_job_state, set_job_stop_requested, is_job_stop_requested
+from task_queue.job_store import (
+    save_job_state,
+    get_job_state,
+    set_job_stop_requested,
+    is_job_stop_requested,
+    list_job_states,
+)
+from task_queue.dispatcher import submit_extract_job, submit_contact_job, worker_pool_stats
+from task_queue.postgres_mirror import (
+    ensure_schema as pg_ensure_schema,
+    postgres_enabled as pg_enabled,
+    mirror_session_state as pg_mirror_session_state,
+    mirror_event as pg_mirror_event,
+    mirror_task as pg_mirror_task,
+    mirror_task_chunk as pg_mirror_task_chunk,
+)
 from workers.scraper_worker import run_scraper_job
 
 # Instagram search-type aliases (old → new)
@@ -89,6 +106,24 @@ def _csrf_protect_non_api():
         except Exception:
             pass  # Let Flask-WTF handle the error response
 
+
+@app.before_request
+def _auto_sweep_stale_tasks_before_request():
+    """Best-effort automatic stale-task recovery pass (throttled)."""
+    try:
+        _run_auto_stale_task_sweeper()
+    except Exception:
+        pass
+
+
+@app.before_request
+def _auto_retention_cleanup_before_request():
+    """Best-effort retention cleanup pass (throttled)."""
+    try:
+        _run_auto_retention_cleanup()
+    except Exception:
+        pass
+
 # --- CORS ---
 _origins = os.environ.get("ALLOWED_ORIGINS", "*").split(",")
 CORS(app, origins=[o.strip() for o in _origins], supports_credentials=True)
@@ -121,6 +156,39 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Maximum number of completed jobs to keep in memory per store
 _MAX_FINISHED_JOBS = 20
 GMAPS_JOB_STATES = {"PENDING", "RUNNING", "PARTIAL", "COMPLETED", "FAILED"}
+_AUTO_SWEEP_ENABLED = os.environ.get("LEADGEN_AUTO_STALE_SWEEP", "1").lower() in ("1", "true", "yes")
+_AUTO_SWEEP_INTERVAL_SECONDS = max(15, int(os.environ.get("LEADGEN_AUTO_SWEEP_INTERVAL_SECONDS", "60")))
+_AUTO_SWEEP_STALE_SECONDS = max(60, int(os.environ.get("LEADGEN_AUTO_SWEEP_STALE_SECONDS", "180")))
+_TASK_RETRY_MAX_ATTEMPTS_DEFAULT = max(1, int(os.environ.get("LEADGEN_TASK_RETRY_MAX_ATTEMPTS", "3")))
+_TASK_RETRY_BACKOFF_SECONDS_DEFAULT = max(10, int(os.environ.get("LEADGEN_TASK_RETRY_BACKOFF_SECONDS", "45")))
+_OPERATOR_OVERRIDE_ALL = os.environ.get("LEADGEN_OPERATOR_OVERRIDE_ALL", "0").lower() in ("1", "true", "yes")
+_OPERATOR_EMAIL_ALLOWLIST = {
+    e.strip().lower()
+    for e in os.environ.get("LEADGEN_OPERATOR_EMAILS", "").split(",")
+    if e.strip()
+}
+_RETENTION_ENABLED = os.environ.get("LEADGEN_RETENTION_ENABLED", "1").lower() in ("1", "true", "yes")
+_RETENTION_INTERVAL_SECONDS = max(300, int(os.environ.get("LEADGEN_RETENTION_INTERVAL_SECONDS", "3600")))
+_RETENTION_EVENTS_DAYS = max(7, int(os.environ.get("LEADGEN_RETENTION_EVENTS_DAYS", "45")))
+_RETENTION_LOGS_DAYS = max(7, int(os.environ.get("LEADGEN_RETENTION_LOGS_DAYS", "30")))
+_RETENTION_TASKS_DAYS = max(7, int(os.environ.get("LEADGEN_RETENTION_TASKS_DAYS", "60")))
+_CONTACT_TASK_CHUNK_SIZE = max(5, int(os.environ.get("LEADGEN_CONTACT_TASK_CHUNK_SIZE", "25")))
+_OPS_METRICS_DEFAULT_WINDOW_HOURS = max(1, int(os.environ.get("LEADGEN_OPS_METRICS_WINDOW_HOURS", "24")))
+_OPS_ALERT_QUEUE_WARN_PCT = min(1.0, max(0.1, float(os.environ.get("LEADGEN_OPS_QUEUE_WARN_PCT", "0.80"))))
+_OPS_ALERT_QUEUE_CRIT_PCT = min(1.0, max(_OPS_ALERT_QUEUE_WARN_PCT, float(os.environ.get("LEADGEN_OPS_QUEUE_CRIT_PCT", "0.95"))))
+_OPS_ALERT_FAILURE_WARN = max(1, int(os.environ.get("LEADGEN_OPS_FAILURE_WARN", "8")))
+_OPS_ALERT_FAILURE_CRIT = max(_OPS_ALERT_FAILURE_WARN, int(os.environ.get("LEADGEN_OPS_FAILURE_CRIT", "20")))
+_auto_sweep_lock = threading.Lock()
+_last_auto_sweep_at = 0.0
+_retention_lock = threading.Lock()
+_last_retention_at = 0.0
+_last_retention_summary = {
+    "last_run_at": None,
+    "events_deleted": 0,
+    "logs_deleted": 0,
+    "tasks_deleted": 0,
+    "error": None,
+}
 
 
 def _cleanup_jobs(store: dict, max_keep: int = _MAX_FINISHED_JOBS):
@@ -158,7 +226,2157 @@ def _state_for_frontend(job_state: dict) -> dict:
     state.setdefault("results_count", 0)
     state.setdefault("area_stats", {})
     state.setdefault("lead_count", state.get("results_count", 0))
+    state.setdefault("phase", "extract")
+    state.setdefault("contacts_status", "pending")
+    state.setdefault("logs", [])
     return state
+
+
+def _append_job_log(state: dict, message: str, percent: int | None = None):
+    logs = state.get("logs") if isinstance(state.get("logs"), list) else []
+    entry = {
+        "at": datetime.utcnow().isoformat(),
+        "message": str(message),
+    }
+    if percent is not None:
+        entry["progress"] = int(max(0, min(100, percent)))
+    logs.append(entry)
+    state["logs"] = logs[-300:]
+
+
+def _structured_log(name: str, *, level: str = "info", **fields):
+    payload = {
+        "ts": datetime.utcnow().isoformat(),
+        "event": str(name or "event"),
+        **fields,
+    }
+    line = json.dumps(payload, default=str, separators=(",", ":"))
+    lvl = str(level or "info").lower()
+    if lvl == "error":
+        log.error(line)
+    elif lvl in {"warning", "warn"}:
+        log.warning(line)
+    else:
+        log.info(line)
+
+
+def _ensure_lead_uid(lead: dict) -> str:
+    uid = str(lead.get("lead_uid") or "").strip()
+    if uid:
+        return uid
+    key = "|".join([
+        str(lead.get("business_name") or "").strip().lower(),
+        str(lead.get("latitude") or "").strip(),
+        str(lead.get("longitude") or "").strip(),
+        str(lead.get("address") or "").strip().lower(),
+    ])
+    uid = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    lead["lead_uid"] = uid
+    return uid
+
+
+def _persist_gmaps_state(state: dict):
+    """Persist Google Maps session snapshot + leads + latest log into SQLite."""
+    if state.get("tool") != "gmaps":
+        return
+
+    session_id = str(state.get("job_id") or "").strip()
+    user_id = state.get("user_id")
+    if not session_id or not user_id:
+        return
+
+    keyword = str(state.get("keyword") or "")
+    place = str(state.get("place") or "")
+    max_leads = state.get("max_leads")
+    phase = str(state.get("phase") or "extract")
+    extraction_status = str(state.get("extraction_status") or "pending")
+    contacts_status = str(state.get("contacts_status") or "pending")
+    status = str(state.get("status") or "PENDING")
+    progress = int(state.get("progress") or 0)
+    message = str(state.get("message") or "")
+    created_at = state.get("created_at") or datetime.utcnow().isoformat()
+    updated_at = state.get("updated_at") or datetime.utcnow().isoformat()
+    finished_at = state.get("finished_at")
+    results = state.get("results") if isinstance(state.get("results"), list) else []
+    results_count = len(results)
+    status_upper = status.upper()
+
+    if status_upper == "COMPLETED" and contacts_status == "completed":
+        history_status = "completed"
+    elif status_upper == "FAILED":
+        history_status = "failed"
+    elif status_upper in ("PARTIAL", "STOPPED") or extraction_status in ("partial", "failed") or contacts_status in ("paused", "failed"):
+        history_status = "stopped"
+    else:
+        history_status = "running"
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+
+        db.execute(
+            """
+            INSERT INTO gmaps_sessions (
+                session_id, user_id, keyword, place, max_leads,
+                phase, extraction_status, contacts_status, status,
+                progress, message, results_count, created_at, updated_at, finished_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id) DO UPDATE SET
+                keyword=excluded.keyword,
+                place=excluded.place,
+                max_leads=excluded.max_leads,
+                phase=excluded.phase,
+                extraction_status=excluded.extraction_status,
+                contacts_status=excluded.contacts_status,
+                status=excluded.status,
+                progress=excluded.progress,
+                message=excluded.message,
+                results_count=excluded.results_count,
+                updated_at=excluded.updated_at,
+                finished_at=excluded.finished_at
+            """,
+            (
+                session_id, user_id, keyword, place, max_leads,
+                phase, extraction_status, contacts_status, status,
+                progress, message, results_count, created_at, updated_at, finished_at,
+            ),
+        )
+
+        # Mirror session data into primary lead database tables so session leads
+        # are always accessible from the Database view.
+        scrape_row = db.execute(
+            """
+            SELECT id FROM scrape_history
+            WHERE user_id = ? AND job_id = ? AND tool = 'gmaps'
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (user_id, session_id),
+        ).fetchone()
+
+        if scrape_row:
+            scrape_id = int(scrape_row[0])
+        else:
+            db.execute(
+                """
+                INSERT INTO scrape_history (
+                    user_id, job_id, tool, keyword, location, search_type,
+                    status, lead_count, started_at
+                ) VALUES (?, ?, 'gmaps', ?, ?, '', ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    session_id,
+                    keyword,
+                    place,
+                    history_status,
+                    results_count,
+                    created_at,
+                ),
+            )
+            scrape_id = int(db.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+        db.execute(
+            """
+            UPDATE scrape_history
+            SET keyword = ?,
+                location = ?,
+                status = ?,
+                lead_count = ?,
+                finished_at = CASE
+                    WHEN ? IN ('completed', 'failed', 'stopped') THEN COALESCE(?, datetime('now'))
+                    ELSE NULL
+                END
+            WHERE id = ? AND user_id = ?
+            """,
+            (
+                keyword,
+                place,
+                history_status,
+                results_count,
+                history_status,
+                finished_at,
+                scrape_id,
+                user_id,
+            ),
+        )
+
+        # Keep the primary leads table in-sync with the latest session snapshot.
+        db.execute(
+            "DELETE FROM leads WHERE user_id = ? AND scrape_id = ? AND tool = 'gmaps'",
+            (user_id, scrape_id),
+        )
+
+        mirror_rows = []
+        for lead in results:
+            lead_uid = _ensure_lead_uid(lead)
+            email = str(lead.get("email") or "")
+            phone = str(lead.get("phone") or "")
+            website = str(lead.get("website") or "")
+            has_email = bool(email and email != "N/A")
+            has_phone = bool(phone and phone != "N/A")
+            quality = "strong" if has_email and has_phone else ("medium" if has_email or has_phone else "weak")
+            payload = dict(lead)
+            payload["lead_uid"] = lead_uid
+            mirror_rows.append((
+                user_id,
+                scrape_id,
+                "gmaps",
+                keyword,
+                place,
+                str(lead.get("business_name") or ""),
+                email,
+                phone,
+                website,
+                quality,
+                json.dumps(payload, default=str),
+            ))
+
+        if mirror_rows:
+            db.executemany(
+                """
+                INSERT INTO leads (
+                    user_id, scrape_id, tool, keyword, location,
+                    title, email, phone, website, quality, data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                mirror_rows,
+            )
+
+        for lead in results:
+            lead_uid = _ensure_lead_uid(lead)
+            email = str(lead.get("email") or "")
+            phone = str(lead.get("phone") or "")
+            website = str(lead.get("website") or "")
+            is_complete = 1 if (email and email != "N/A") or (phone and phone != "N/A") else 0
+            db.execute(
+                """
+                INSERT INTO gmaps_session_leads (
+                    session_id, user_id, lead_uid, business_name, owner_name,
+                    phone, website, email, address, rating, reviews,
+                    category, latitude, longitude, facebook, instagram,
+                    twitter, linkedin, youtube, tiktok, pinterest,
+                    stage, is_complete, payload, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(session_id, lead_uid) DO UPDATE SET
+                    business_name=excluded.business_name,
+                    owner_name=excluded.owner_name,
+                    phone=excluded.phone,
+                    website=excluded.website,
+                    email=excluded.email,
+                    address=excluded.address,
+                    rating=excluded.rating,
+                    reviews=excluded.reviews,
+                    category=excluded.category,
+                    latitude=excluded.latitude,
+                    longitude=excluded.longitude,
+                    facebook=excluded.facebook,
+                    instagram=excluded.instagram,
+                    twitter=excluded.twitter,
+                    linkedin=excluded.linkedin,
+                    youtube=excluded.youtube,
+                    tiktok=excluded.tiktok,
+                    pinterest=excluded.pinterest,
+                    stage=excluded.stage,
+                    is_complete=excluded.is_complete,
+                    payload=excluded.payload,
+                    updated_at=datetime('now')
+                """,
+                (
+                    session_id,
+                    user_id,
+                    lead_uid,
+                    str(lead.get("business_name") or ""),
+                    str(lead.get("owner_name") or ""),
+                    phone,
+                    website,
+                    email,
+                    str(lead.get("address") or ""),
+                    str(lead.get("rating") or ""),
+                    str(lead.get("reviews") or ""),
+                    str(lead.get("category") or ""),
+                    str(lead.get("latitude") or ""),
+                    str(lead.get("longitude") or ""),
+                    str(lead.get("facebook") or ""),
+                    str(lead.get("instagram") or ""),
+                    str(lead.get("twitter") or ""),
+                    str(lead.get("linkedin") or ""),
+                    str(lead.get("youtube") or ""),
+                    str(lead.get("tiktok") or ""),
+                    str(lead.get("pinterest") or ""),
+                    phase,
+                    is_complete,
+                    json.dumps(lead, default=str),
+                ),
+            )
+
+        logs = state.get("logs") if isinstance(state.get("logs"), list) else []
+        if logs:
+            latest = logs[-1]
+            log_msg = str(latest.get("message") or "")
+            log_progress = latest.get("progress")
+            log_at = latest.get("at") or datetime.utcnow().isoformat()
+            log_hash = hashlib.sha1(f"{session_id}|{log_at}|{log_msg}|{log_progress}".encode("utf-8")).hexdigest()
+            db.execute(
+                """
+                INSERT OR IGNORE INTO gmaps_session_logs (
+                    session_id, user_id, phase, progress, message, log_hash, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    user_id,
+                    phase,
+                    int(log_progress) if isinstance(log_progress, int) else None,
+                    log_msg,
+                    log_hash,
+                    log_at,
+                ),
+            )
+
+        db.commit()
+        db.close()
+
+        if pg_enabled():
+            pg_mirror_session_state(state)
+    except Exception as exc:
+        log.error(f"Failed to persist gmaps session state {session_id}: {exc}")
+
+
+def _persist_gmaps_event(state: dict, event_type: str, message: str,
+                         *, severity: str = "info", payload: dict | None = None):
+    """Persist durable event timeline for Google Maps sessions."""
+    if state.get("tool") != "gmaps":
+        return
+
+    session_id = str(state.get("job_id") or "").strip()
+    user_id = state.get("user_id")
+    if not session_id or not user_id:
+        return
+
+    phase = str(state.get("phase") or "extract")
+    status = str(state.get("status") or "PENDING")
+    progress = int(state.get("progress") or 0)
+    created_at = datetime.utcnow().isoformat()
+    safe_message = str(message or "")[:1000]
+    payload_json = json.dumps(payload or {}, default=str)
+
+    event_hash_src = "|".join([
+        session_id,
+        str(user_id),
+        str(event_type),
+        str(severity),
+        phase,
+        status,
+        str(progress),
+        safe_message,
+        payload_json,
+    ])
+    event_hash = hashlib.sha1(event_hash_src.encode("utf-8")).hexdigest()
+
+    _structured_log(
+        "gmaps_session_event",
+        level=severity,
+        session_id=session_id,
+        user_id=user_id,
+        event_type=event_type,
+        severity=severity,
+        phase=phase,
+        status=status,
+        progress=progress,
+        message=safe_message,
+    )
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            """
+            INSERT OR IGNORE INTO gmaps_session_events (
+                session_id, user_id, event_type, severity,
+                phase, status, progress, message, payload,
+                event_hash, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                user_id,
+                event_type,
+                severity,
+                phase,
+                status,
+                progress,
+                safe_message,
+                payload_json,
+                event_hash,
+                created_at,
+            ),
+        )
+        db.commit()
+        db.close()
+
+        if pg_enabled():
+            pg_mirror_event(
+                session_id=session_id,
+                user_id=int(user_id),
+                event_type=str(event_type),
+                severity=str(severity),
+                phase=phase,
+                status=status,
+                progress=progress,
+                message=safe_message,
+                payload=payload or {},
+                event_hash=event_hash,
+                created_at=created_at,
+            )
+    except Exception as exc:
+        log.error(f"Failed to persist gmaps event {session_id}:{event_type}: {exc}")
+
+
+def _persist_partial_snapshot_checkpoint(state: dict, *, reason: str):
+    """Emit durable checkpoint confirming partial data was persisted before transition."""
+    if state.get("tool") != "gmaps":
+        return
+
+    results = state.get("results") if isinstance(state.get("results"), list) else []
+    _persist_gmaps_event(
+        state,
+        "partial_snapshot_persisted",
+        f"Persisted partial snapshot with {len(results)} lead(s) before transition",
+        severity="warning",
+        payload={
+            "reason": (reason or "")[:120],
+            "phase": state.get("phase"),
+            "status": state.get("status"),
+            "results_count": len(results),
+        },
+    )
+
+
+def _upsert_gmaps_task(*, session_id: str, user_id: int, task_key: str,
+                       phase: str, status: str,
+                       payload: dict | None = None,
+                       error: str | None = None,
+                       retry_reason: str | None = None,
+                       max_attempts: int | None = None,
+                       retry_backoff_seconds: int | None = None):
+    """Persist task lifecycle transitions for resumable orchestration."""
+    if not session_id or not user_id or not task_key:
+        return
+
+    now = datetime.utcnow().isoformat()
+    payload_json = json.dumps(payload or {}, default=str)
+    safe_error = (error or "")[:2000]
+    safe_status = str(status or "pending").strip().lower()
+    safe_retry_reason = (retry_reason or "")[:500]
+    safe_max_attempts = int(max_attempts or _TASK_RETRY_MAX_ATTEMPTS_DEFAULT)
+    safe_backoff = int(retry_backoff_seconds or _TASK_RETRY_BACKOFF_SECONDS_DEFAULT)
+    safe_max_attempts = max(1, safe_max_attempts)
+    safe_backoff = max(10, safe_backoff)
+
+    started_at = now if safe_status == "running" else None
+    finished_at = now if safe_status in ("completed", "failed", "canceled") else None
+    retry_cooldown_until = (
+        (datetime.utcnow() + timedelta(seconds=safe_backoff)).isoformat()
+        if safe_status == "running"
+        else None
+    )
+    last_retry_at = now if safe_status == "running" else None
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            """
+            INSERT INTO gmaps_session_tasks (
+                session_id, user_id, task_key, phase, status,
+                attempt_count, last_error, payload,
+                max_attempts, retry_backoff_seconds, retry_cooldown_until,
+                last_retry_reason, last_retry_at,
+                started_at, finished_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, task_key) DO UPDATE SET
+                phase=excluded.phase,
+                status=excluded.status,
+                attempt_count=CASE
+                    WHEN excluded.status='running' THEN gmaps_session_tasks.attempt_count + 1
+                    ELSE gmaps_session_tasks.attempt_count
+                END,
+                last_error=CASE
+                    WHEN excluded.last_error!='' THEN excluded.last_error
+                    ELSE gmaps_session_tasks.last_error
+                END,
+                payload=excluded.payload,
+                max_attempts=COALESCE(gmaps_session_tasks.max_attempts, excluded.max_attempts),
+                retry_backoff_seconds=COALESCE(gmaps_session_tasks.retry_backoff_seconds, excluded.retry_backoff_seconds),
+                retry_cooldown_until=CASE
+                    WHEN excluded.status='running' THEN excluded.retry_cooldown_until
+                    ELSE gmaps_session_tasks.retry_cooldown_until
+                END,
+                last_retry_reason=CASE
+                    WHEN excluded.last_retry_reason!='' THEN excluded.last_retry_reason
+                    ELSE gmaps_session_tasks.last_retry_reason
+                END,
+                last_retry_at=CASE
+                    WHEN excluded.status='running' THEN excluded.last_retry_at
+                    ELSE gmaps_session_tasks.last_retry_at
+                END,
+                started_at=CASE
+                    WHEN excluded.status='running' THEN excluded.started_at
+                    ELSE gmaps_session_tasks.started_at
+                END,
+                finished_at=CASE
+                    WHEN excluded.status IN ('completed', 'failed', 'canceled') THEN excluded.finished_at
+                    ELSE gmaps_session_tasks.finished_at
+                END,
+                updated_at=excluded.updated_at
+            """,
+            (
+                session_id,
+                user_id,
+                task_key,
+                phase,
+                safe_status,
+                safe_error,
+                payload_json,
+                safe_max_attempts,
+                safe_backoff,
+                retry_cooldown_until,
+                safe_retry_reason,
+                last_retry_at,
+                started_at,
+                finished_at,
+                now,
+                now,
+            ),
+        )
+        db.commit()
+        db.close()
+
+        if pg_enabled():
+            existing = _load_gmaps_task_record(session_id, task_key) or {}
+            pg_mirror_task(
+                session_id=session_id,
+                user_id=int(user_id),
+                task_key=task_key,
+                phase=str(phase or "extract"),
+                status=safe_status,
+                attempt_count=int(existing.get("attempt_count") or (1 if safe_status == "running" else 0)),
+                last_error=safe_error,
+                payload=payload or {},
+                max_attempts=safe_max_attempts,
+                retry_backoff_seconds=safe_backoff,
+                retry_cooldown_until=retry_cooldown_until,
+                last_retry_reason=safe_retry_reason,
+                last_retry_at=last_retry_at,
+                started_at=started_at,
+                finished_at=finished_at,
+                now=now,
+            )
+    except Exception as exc:
+        log.error(f"Failed to upsert gmaps task {session_id}:{task_key}: {exc}")
+
+
+def _upsert_gmaps_task_chunk(*, session_id: str, user_id: int, task_key: str,
+                             chunk_key: str, status: str,
+                             payload: dict | None = None,
+                             error: str | None = None):
+    if not session_id or not user_id or not task_key or not chunk_key:
+        return
+
+    now = datetime.utcnow().isoformat()
+    payload_json = json.dumps(payload or {}, default=str)
+    safe_error = (error or "")[:2000]
+    safe_status = str(status or "pending").strip().lower()
+    started_at = now if safe_status == "running" else None
+    finished_at = now if safe_status in ("completed", "failed", "canceled") else None
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            """
+            INSERT INTO gmaps_task_chunks (
+                session_id, user_id, task_key, chunk_key, status,
+                attempt_count, last_error, payload,
+                started_at, finished_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, task_key, chunk_key) DO UPDATE SET
+                status=excluded.status,
+                attempt_count=CASE
+                    WHEN excluded.status='running' THEN gmaps_task_chunks.attempt_count + 1
+                    ELSE gmaps_task_chunks.attempt_count
+                END,
+                last_error=CASE
+                    WHEN excluded.last_error!='' THEN excluded.last_error
+                    ELSE gmaps_task_chunks.last_error
+                END,
+                payload=excluded.payload,
+                started_at=CASE
+                    WHEN excluded.status='running' THEN excluded.started_at
+                    ELSE gmaps_task_chunks.started_at
+                END,
+                finished_at=CASE
+                    WHEN excluded.status IN ('completed', 'failed', 'canceled') THEN excluded.finished_at
+                    ELSE gmaps_task_chunks.finished_at
+                END,
+                updated_at=excluded.updated_at
+            """,
+            (
+                session_id,
+                user_id,
+                task_key,
+                chunk_key,
+                safe_status,
+                safe_error,
+                payload_json,
+                started_at,
+                finished_at,
+                now,
+                now,
+            ),
+        )
+        db.commit()
+        db.close()
+
+        if pg_enabled():
+            existing_attempt = 0
+            rows = _load_gmaps_task_chunks(session_id, task_key)
+            for row in rows:
+                if str(row.get("chunk_key") or "") == str(chunk_key):
+                    existing_attempt = int(row.get("attempt_count") or 0)
+                    break
+            pg_mirror_task_chunk(
+                session_id=session_id,
+                user_id=int(user_id),
+                task_key=task_key,
+                chunk_key=chunk_key,
+                status=safe_status,
+                attempt_count=(existing_attempt + 1 if safe_status == "running" else existing_attempt),
+                last_error=safe_error,
+                payload=payload or {},
+                started_at=started_at,
+                finished_at=finished_at,
+                now=now,
+            )
+    except Exception as exc:
+        log.error(f"Failed to upsert gmaps task chunk {session_id}:{task_key}:{chunk_key}: {exc}")
+
+
+def _load_gmaps_task_chunks(session_id: str, task_key: str) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT chunk_key, status, attempt_count, last_error, payload,
+                   started_at, finished_at, updated_at
+            FROM gmaps_task_chunks
+            WHERE session_id=? AND task_key=?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            """,
+            (session_id, task_key),
+        ).fetchall()
+        db.close()
+
+        chunks: list[dict] = []
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                payload = {}
+            chunks.append({
+                "chunk_key": row["chunk_key"],
+                "status": row["status"],
+                "attempt_count": int(row["attempt_count"] or 0),
+                "last_error": row["last_error"] or "",
+                "payload": payload,
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "updated_at": row["updated_at"],
+            })
+        return chunks
+    except Exception:
+        return []
+
+
+def _task_chunk_summary(session_id: str, task_key: str) -> dict:
+    chunks = _load_gmaps_task_chunks(session_id, task_key)
+    total = len(chunks)
+    completed = sum(1 for c in chunks if str(c.get("status") or "").lower() == "completed")
+    failed = sum(1 for c in chunks if str(c.get("status") or "").lower() == "failed")
+    running = sum(1 for c in chunks if str(c.get("status") or "").lower() == "running")
+    return {
+        "task_key": task_key,
+        "total_chunks": total,
+        "completed_chunks": completed,
+        "failed_chunks": failed,
+        "running_chunks": running,
+        "checkpointed": completed > 0,
+    }
+
+
+def _load_completed_chunk_outputs(session_id: str, task_key: str) -> dict[str, list[dict]]:
+    rows = _load_gmaps_task_chunks(session_id, task_key)
+    outputs: dict[str, list[dict]] = {}
+    for row in rows:
+        if str(row.get("status") or "").lower() != "completed":
+            continue
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        output_leads = payload.get("output_leads") if isinstance(payload.get("output_leads"), list) else []
+        chunk_key = str(row.get("chunk_key") or "").strip()
+        if chunk_key:
+            outputs[chunk_key] = output_leads
+    return outputs
+
+
+def _clear_task_chunks(session_id: str, task_key: str):
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            "DELETE FROM gmaps_task_chunks WHERE session_id=? AND task_key=?",
+            (session_id, task_key),
+        )
+        db.commit()
+        db.close()
+    except Exception as exc:
+        log.error(f"Failed to clear task chunks {session_id}:{task_key}: {exc}")
+
+
+def _build_contacts_chunks(leads: list[dict], chunk_size: int) -> list[dict]:
+    safe_chunk_size = max(1, int(chunk_size or _CONTACT_TASK_CHUNK_SIZE))
+    normalized: list[dict] = []
+    for lead in leads:
+        if not isinstance(lead, dict):
+            continue
+        _ensure_lead_uid(lead)
+        normalized.append(dict(lead))
+
+    chunks: list[dict] = []
+    for i in range(0, len(normalized), safe_chunk_size):
+        part = normalized[i:i + safe_chunk_size]
+        ids = [str(p.get("lead_uid") or "") for p in part if str(p.get("lead_uid") or "")]
+        seed = "|".join(ids) if ids else f"chunk:{i // safe_chunk_size}"
+        chunk_key = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:16]
+        chunks.append({
+            "chunk_index": (i // safe_chunk_size) + 1,
+            "chunk_key": chunk_key,
+            "leads": part,
+        })
+    return chunks
+
+
+def _load_job_state_with_fallback(job_id: str) -> dict | None:
+    state = get_job_state(job_id)
+    if state:
+        return state
+
+    persisted = _load_persisted_session_state(job_id)
+    if persisted:
+        try:
+            save_job_state(job_id, persisted)
+        except Exception:
+            pass
+        return persisted
+    return None
+
+
+def _save_job_state_and_persist(job_id: str, state: dict):
+    previous = get_job_state(job_id) or {}
+    save_job_state(job_id, state)
+    _persist_gmaps_state(state)
+
+    if state.get("tool") != "gmaps":
+        return
+
+    prev_status = str(previous.get("status") or "")
+    new_status = str(state.get("status") or "")
+    if new_status and prev_status != new_status:
+        _persist_gmaps_event(
+            state,
+            "status_changed",
+            f"Status changed: {prev_status or 'N/A'} -> {new_status}",
+            payload={"from": prev_status, "to": new_status},
+        )
+
+    prev_phase = str(previous.get("phase") or "")
+    new_phase = str(state.get("phase") or "")
+    if new_phase and prev_phase != new_phase:
+        _persist_gmaps_event(
+            state,
+            "phase_changed",
+            f"Phase changed: {prev_phase or 'N/A'} -> {new_phase}",
+            payload={"from": prev_phase, "to": new_phase},
+        )
+
+    prev_bucket = int(previous.get("progress") or 0) // 10
+    new_bucket = int(state.get("progress") or 0) // 10
+    if new_bucket > prev_bucket:
+        _persist_gmaps_event(
+            state,
+            "progress_checkpoint",
+            f"Progress reached {min(100, new_bucket * 10)}%",
+            payload={"progress": int(state.get("progress") or 0)},
+        )
+
+    prev_error = str(previous.get("error") or "").strip()
+    new_error = str(state.get("error") or "").strip()
+    if new_error and new_error != prev_error:
+        _persist_gmaps_event(
+            state,
+            "error",
+            f"Error captured: {new_error[:300]}",
+            severity="error",
+            payload={"error": new_error},
+        )
+
+
+def _flush_job_states_on_exit():
+    """Best-effort flush of in-memory jobs to SQLite on graceful process exit."""
+    try:
+        for state in list_job_states():
+            if not isinstance(state, dict):
+                continue
+            job_id = str(state.get("job_id") or "").strip()
+            if not job_id:
+                continue
+            _save_job_state_and_persist(job_id, state)
+    except Exception as exc:
+        log.error(f"Failed to flush job states on exit: {exc}")
+
+
+atexit.register(_flush_job_states_on_exit)
+
+
+def _load_persisted_session_leads(session_id: str) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT payload FROM gmaps_session_leads
+            WHERE session_id=?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (session_id,),
+        ).fetchall()
+        db.close()
+        leads = []
+        for row in rows:
+            payload = row["payload"] or "{}"
+            try:
+                leads.append(json.loads(payload))
+            except Exception:
+                continue
+        return leads
+    except Exception:
+        return []
+
+
+def _load_persisted_session_state(session_id: str) -> dict | None:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT session_id, user_id, keyword, place, max_leads,
+                   phase, extraction_status, contacts_status, status,
+                   progress, message, results_count, created_at, updated_at, finished_at
+            FROM gmaps_sessions
+            WHERE session_id=?
+            """,
+            (session_id,),
+        ).fetchone()
+        db.close()
+        if not row:
+            return None
+        return {
+            "job_id": row["session_id"],
+            "tool": "gmaps",
+            "user_id": row["user_id"],
+            "keyword": row["keyword"],
+            "place": row["place"],
+            "max_leads": row["max_leads"],
+            "phase": row["phase"],
+            "extraction_status": row["extraction_status"],
+            "contacts_status": row["contacts_status"],
+            "status": row["status"],
+            "progress": row["progress"],
+            "message": row["message"],
+            "results_count": row["results_count"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "finished_at": row["finished_at"],
+            "results": _load_persisted_session_leads(session_id),
+            "logs": [],
+        }
+    except Exception:
+        return None
+
+
+def _list_persisted_sessions(user_id: int) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT session_id, user_id, keyword, place, max_leads,
+                   phase, extraction_status, contacts_status, status,
+                   progress, message, results_count, created_at, updated_at, finished_at
+            FROM gmaps_sessions
+            WHERE user_id=?
+            ORDER BY datetime(updated_at) DESC
+            LIMIT 200
+            """,
+            (user_id,),
+        ).fetchall()
+        db.close()
+        sessions = []
+        for row in rows:
+            sessions.append({
+                "job_id": row["session_id"],
+                "tool": "gmaps",
+                "user_id": row["user_id"],
+                "keyword": row["keyword"],
+                "place": row["place"],
+                "max_leads": row["max_leads"],
+                "phase": row["phase"],
+                "extraction_status": row["extraction_status"],
+                "contacts_status": row["contacts_status"],
+                "status": row["status"],
+                "progress": row["progress"],
+                "message": row["message"],
+                "results_count": row["results_count"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "finished_at": row["finished_at"],
+                "logs": [],
+            })
+        return sessions
+    except Exception:
+        return []
+
+
+def _completion_by_user(user_id: int) -> dict[str, dict]:
+    """Return per-session completion counts for a user."""
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT session_id,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN is_complete=1 THEN 1 ELSE 0 END) AS complete_count,
+                   SUM(CASE WHEN is_complete=0 THEN 1 ELSE 0 END) AS incomplete_count
+            FROM gmaps_session_leads
+            WHERE user_id=?
+            GROUP BY session_id
+            """,
+            (user_id,),
+        ).fetchall()
+        db.close()
+
+        result: dict[str, dict] = {}
+        for row in rows:
+            total = int(row["total"] or 0)
+            complete = int(row["complete_count"] or 0)
+            incomplete = int(row["incomplete_count"] or 0)
+            result[row["session_id"]] = {
+                "total": total,
+                "complete_count": complete,
+                "incomplete_count": incomplete,
+                "completion_rate": int((complete / total) * 100) if total > 0 else 0,
+            }
+        return result
+    except Exception:
+        return {}
+
+
+def _load_persisted_session_logs(session_id: str, limit: int = 200) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT phase, progress, message, created_at
+            FROM gmaps_session_logs
+            WHERE session_id=?
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, int(max(1, limit))),
+        ).fetchall()
+        db.close()
+        logs = []
+        for row in reversed(rows):
+            logs.append({
+                "phase": row["phase"],
+                "progress": row["progress"],
+                "message": row["message"],
+                "at": row["created_at"],
+            })
+        return logs
+    except Exception:
+        return []
+
+
+def _load_persisted_session_events(session_id: str, limit: int = 200) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT event_type, severity, phase, status, progress, message, payload, created_at
+            FROM gmaps_session_events
+            WHERE session_id=?
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, int(max(1, limit))),
+        ).fetchall()
+        db.close()
+
+        events: list[dict] = []
+        for row in reversed(rows):
+            payload = {}
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                payload = {}
+            events.append({
+                "event_type": row["event_type"],
+                "severity": row["severity"],
+                "phase": row["phase"],
+                "status": row["status"],
+                "progress": row["progress"],
+                "message": row["message"],
+                "payload": payload,
+                "at": row["created_at"],
+            })
+        return events
+    except Exception:
+        return []
+
+
+def _event_matches_audit_scope(event_type: str, scope: str) -> bool:
+    et = str(event_type or "").strip().lower()
+    s = str(scope or "operator").strip().lower()
+
+    operator_events = {
+        "task_operator_denied",
+        "task_attempts_reset",
+        "task_force_retry_requested",
+    }
+    recovery_events = {
+        "task_retry_requested",
+        "task_force_retry_requested",
+        "task_retry_blocked",
+        "stale_tasks_recovered",
+        "auto_stale_sweep_recovered",
+        "task_attempts_reset",
+    }
+
+    if s == "all":
+        return True
+    if s == "operator":
+        return et in operator_events
+    if s == "recovery":
+        return et in recovery_events
+    return et in operator_events
+
+
+def _load_scoped_audit_events(session_id: str, scope: str = "operator", limit: int = 200) -> list[dict]:
+    events = _load_persisted_session_events(session_id, limit=max(limit * 4, 200))
+    filtered = [
+        e for e in events
+        if _event_matches_audit_scope(e.get("event_type") or "", scope)
+    ]
+    if limit <= 0:
+        return filtered
+    return filtered[-int(max(1, limit)):]
+
+
+def _ops_safe_window_hours(hours: int | None) -> int:
+    if hours is None:
+        return _OPS_METRICS_DEFAULT_WINDOW_HOURS
+    return int(max(1, min(int(hours), 168)))
+
+
+def _ops_stage_metrics(user_id: int, window_hours: int) -> dict:
+    since_iso = (datetime.utcnow() - timedelta(hours=_ops_safe_window_hours(window_hours))).isoformat()
+    metrics: dict[str, dict] = {
+        "extract": {
+            "total": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+            "retryable": 0,
+            "avg_attempts": 0.0,
+            "avg_duration_seconds": 0.0,
+            "failure_rate_pct": 0,
+        },
+        "contacts": {
+            "total": 0,
+            "running": 0,
+            "completed": 0,
+            "failed": 0,
+            "retryable": 0,
+            "avg_attempts": 0.0,
+            "avg_duration_seconds": 0.0,
+            "failure_rate_pct": 0,
+        },
+    }
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT phase,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running,
+                   SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed,
+                   SUM(CASE WHEN status='retryable' THEN 1 ELSE 0 END) AS retryable,
+                   AVG(COALESCE(attempt_count, 0)) AS avg_attempts
+            FROM gmaps_session_tasks
+            WHERE user_id=? AND datetime(updated_at) >= datetime(?)
+            GROUP BY phase
+            """,
+            (int(user_id), since_iso),
+        ).fetchall()
+
+        duration_rows = db.execute(
+            """
+            SELECT phase,
+                   AVG((julianday(finished_at) - julianday(started_at)) * 86400.0) AS avg_duration_seconds
+            FROM gmaps_session_tasks
+            WHERE user_id=?
+              AND datetime(updated_at) >= datetime(?)
+              AND started_at IS NOT NULL
+              AND finished_at IS NOT NULL
+              AND status IN ('completed', 'failed')
+            GROUP BY phase
+            """,
+            (int(user_id), since_iso),
+        ).fetchall()
+        db.close()
+
+        for row in rows:
+            phase = str(row["phase"] or "").strip().lower()
+            if phase not in metrics:
+                continue
+            total = int(row["total"] or 0)
+            failed = int(row["failed"] or 0)
+            metrics[phase] = {
+                "total": total,
+                "running": int(row["running"] or 0),
+                "completed": int(row["completed"] or 0),
+                "failed": failed,
+                "retryable": int(row["retryable"] or 0),
+                "avg_attempts": round(float(row["avg_attempts"] or 0.0), 2),
+                "avg_duration_seconds": 0.0,
+                "failure_rate_pct": int(round((failed / total) * 100)) if total > 0 else 0,
+            }
+
+        for row in duration_rows:
+            phase = str(row["phase"] or "").strip().lower()
+            if phase in metrics:
+                metrics[phase]["avg_duration_seconds"] = round(float(row["avg_duration_seconds"] or 0.0), 2)
+
+        return metrics
+    except Exception:
+        return metrics
+
+
+def _ops_recent_failures(user_id: int, window_hours: int, limit: int = 15) -> list[dict]:
+    since_iso = (datetime.utcnow() - timedelta(hours=_ops_safe_window_hours(window_hours))).isoformat()
+    safe_limit = int(max(1, min(limit, 100)))
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT session_id, event_type, severity, phase, status, progress, message, created_at
+            FROM gmaps_session_events
+            WHERE user_id=?
+              AND datetime(created_at) >= datetime(?)
+              AND severity IN ('error', 'warning')
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (int(user_id), since_iso, safe_limit),
+        ).fetchall()
+        db.close()
+        return [
+            {
+                "session_id": row["session_id"],
+                "event_type": row["event_type"],
+                "severity": row["severity"],
+                "phase": row["phase"],
+                "status": row["status"],
+                "progress": row["progress"],
+                "message": row["message"],
+                "at": row["created_at"],
+            }
+            for row in rows
+        ]
+    except Exception:
+        return []
+
+
+def _ops_stuck_sessions(user_id: int, stale_seconds: int = 600, limit: int = 20) -> list[dict]:
+    stale_seconds = int(max(60, stale_seconds))
+    safe_limit = int(max(1, min(limit, 200)))
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT session_id, keyword, place, phase, extraction_status, contacts_status,
+                   status, progress, updated_at
+            FROM gmaps_sessions
+            WHERE user_id=?
+              AND status IN ('RUNNING', 'PENDING')
+              AND ((julianday('now') - julianday(updated_at)) * 86400.0) > ?
+            ORDER BY datetime(updated_at) ASC
+            LIMIT ?
+            """,
+            (int(user_id), float(stale_seconds), safe_limit),
+        ).fetchall()
+        db.close()
+        return [
+            {
+                "job_id": row["session_id"],
+                "keyword": row["keyword"],
+                "place": row["place"],
+                "phase": row["phase"],
+                "extraction_status": row["extraction_status"],
+                "contacts_status": row["contacts_status"],
+                "status": row["status"],
+                "progress": int(row["progress"] or 0),
+                "updated_at": row["updated_at"],
+            }
+            for row in rows
+        ]
+    except Exception:
+        return []
+
+
+def _ops_alerts(user_id: int, window_hours: int) -> list[dict]:
+    checked_at = datetime.utcnow().isoformat()
+    alerts: list[dict] = []
+
+    running_tasks = 0
+    stuck_tasks = 0
+    failure_count = 0
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+            SELECT
+              SUM(CASE WHEN status='running' THEN 1 ELSE 0 END) AS running_count,
+              SUM(CASE
+                    WHEN status='running' AND ((julianday('now') - julianday(updated_at)) * 86400.0) > ?
+                    THEN 1 ELSE 0 END) AS stuck_count
+            FROM gmaps_session_tasks
+            WHERE user_id=?
+            """,
+            (float(_AUTO_SWEEP_STALE_SECONDS), int(user_id)),
+        ).fetchone()
+        running_tasks = int((row["running_count"] if row else 0) or 0)
+        stuck_tasks = int((row["stuck_count"] if row else 0) or 0)
+
+        since_iso = (datetime.utcnow() - timedelta(hours=_ops_safe_window_hours(window_hours))).isoformat()
+        row = db.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM gmaps_session_events
+            WHERE user_id=?
+              AND severity='error'
+              AND datetime(created_at) >= datetime(?)
+            """,
+            (int(user_id), since_iso),
+        ).fetchone()
+        failure_count = int((row["cnt"] if row else 0) or 0)
+        db.close()
+    except Exception:
+        pass
+
+    if stuck_tasks > 0:
+        alerts.append(
+            {
+                "code": "stuck_tasks",
+                "severity": "critical" if stuck_tasks >= 3 else "warning",
+                "message": f"Detected {stuck_tasks} stale running task(s)",
+                "metric": "stuck_tasks",
+                "value": stuck_tasks,
+                "threshold": 1,
+                "recommended_action": "Run auto-recovery for impacted sessions.",
+                "at": checked_at,
+            }
+        )
+
+    pools = worker_pool_stats()
+    for pool_name, pool in pools.items():
+        pending = int(pool.get("pending") or 0)
+        max_pending = max(1, int(pool.get("max_pending") or 1))
+        ratio = pending / max_pending
+        if ratio >= _OPS_ALERT_QUEUE_CRIT_PCT:
+            sev = "critical"
+        elif ratio >= _OPS_ALERT_QUEUE_WARN_PCT:
+            sev = "warning"
+        else:
+            sev = ""
+        if sev:
+            alerts.append(
+                {
+                    "code": f"queue_{pool_name}",
+                    "severity": sev,
+                    "message": f"{pool_name.title()} queue saturation at {int(round(ratio * 100))}%",
+                    "metric": f"{pool_name}.queue_saturation_pct",
+                    "value": int(round(ratio * 100)),
+                    "threshold": int(round((_OPS_ALERT_QUEUE_CRIT_PCT if sev == 'critical' else _OPS_ALERT_QUEUE_WARN_PCT) * 100)),
+                    "recommended_action": "Increase workers or drain queued sessions.",
+                    "at": checked_at,
+                }
+            )
+
+    if failure_count >= _OPS_ALERT_FAILURE_CRIT:
+        severity = "critical"
+    elif failure_count >= _OPS_ALERT_FAILURE_WARN:
+        severity = "warning"
+    else:
+        severity = ""
+    if severity:
+        alerts.append(
+            {
+                "code": "failure_rate",
+                "severity": severity,
+                "message": f"{failure_count} error-level events in last {_ops_safe_window_hours(window_hours)}h",
+                "metric": "error_events",
+                "value": failure_count,
+                "threshold": _OPS_ALERT_FAILURE_CRIT if severity == "critical" else _OPS_ALERT_FAILURE_WARN,
+                "recommended_action": "Inspect diagnostics and retry blocked tasks.",
+                "at": checked_at,
+            }
+        )
+
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    alerts.sort(key=lambda a: (severity_order.get(str(a.get("severity") or "info"), 9), str(a.get("code") or "")))
+    return alerts
+
+
+def _ops_health_snapshot(user_id: int, window_hours: int) -> dict:
+    alerts = _ops_alerts(user_id, window_hours)
+    has_critical = any(str(a.get("severity") or "").lower() == "critical" for a in alerts)
+    has_warning = any(str(a.get("severity") or "").lower() == "warning" for a in alerts)
+
+    if has_critical:
+        status = "unhealthy"
+    elif has_warning:
+        status = "degraded"
+    else:
+        status = "healthy"
+
+    stuck_sessions = _ops_stuck_sessions(user_id, stale_seconds=_AUTO_SWEEP_STALE_SECONDS, limit=10)
+    return {
+        "status": status,
+        "checked_at": datetime.utcnow().isoformat(),
+        "window_hours": _ops_safe_window_hours(window_hours),
+        "alerts": alerts,
+        "alerts_count": len(alerts),
+        "worker_pools": worker_pool_stats(),
+        "stuck_sessions": stuck_sessions,
+        "stuck_sessions_count": len(stuck_sessions),
+    }
+
+
+def _session_diagnostics(job_id: str, state: dict) -> dict:
+    tasks = _load_persisted_session_tasks(job_id, limit=200)
+    task_health = _task_health(tasks, stale_seconds=_AUTO_SWEEP_STALE_SECONDS)
+    checkpoints = _load_persisted_session_events(job_id, limit=250)
+    recent_issues = [
+        event for event in checkpoints
+        if str(event.get("severity") or "").lower() in {"error", "warning"}
+    ][-50:]
+    return {
+        "job_id": job_id,
+        "phase": state.get("phase"),
+        "status": state.get("status"),
+        "extraction_status": state.get("extraction_status"),
+        "contacts_status": state.get("contacts_status"),
+        "resume_anchor": _select_resume_anchor(job_id, state),
+        "task_health": task_health,
+        "tasks": tasks,
+        "task_chunk_summary": _task_chunk_summary(job_id, "contacts_main"),
+        "recent_issues": recent_issues,
+    }
+
+
+def _load_persisted_session_tasks(session_id: str, limit: int = 200) -> list[dict]:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT task_key, phase, status, attempt_count, last_error, payload,
+                     max_attempts, retry_backoff_seconds, retry_cooldown_until,
+                     last_retry_reason, last_retry_at,
+                     started_at, finished_at, updated_at
+            FROM gmaps_session_tasks
+            WHERE session_id=?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT ?
+            """,
+            (session_id, int(max(1, limit))),
+        ).fetchall()
+        db.close()
+
+        tasks: list[dict] = []
+        for row in rows:
+            payload = {}
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except Exception:
+                payload = {}
+            tasks.append({
+                "task_key": row["task_key"],
+                "phase": row["phase"],
+                "status": row["status"],
+                "attempt_count": int(row["attempt_count"] or 0),
+                "last_error": row["last_error"] or "",
+                "payload": payload,
+                "max_attempts": int(row["max_attempts"] or _TASK_RETRY_MAX_ATTEMPTS_DEFAULT),
+                "retry_backoff_seconds": int(row["retry_backoff_seconds"] or _TASK_RETRY_BACKOFF_SECONDS_DEFAULT),
+                "retry_cooldown_until": row["retry_cooldown_until"],
+                "last_retry_reason": row["last_retry_reason"] or "",
+                "last_retry_at": row["last_retry_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "updated_at": row["updated_at"],
+            })
+        return tasks
+    except Exception:
+        return []
+
+
+def _task_health(tasks: list[dict], stale_seconds: int = 180) -> dict:
+    now = datetime.utcnow()
+    running = 0
+    stuck = 0
+
+    for task in tasks:
+        status = str(task.get("status") or "").lower()
+        if status != "running":
+            continue
+        running += 1
+        updated_at = _parse_iso_datetime(str(task.get("updated_at") or ""))
+        if not updated_at:
+            stuck += 1
+            continue
+        if updated_at.tzinfo is not None:
+            updated_at = updated_at.replace(tzinfo=None)
+        age = (now - updated_at).total_seconds()
+        if age > stale_seconds:
+            stuck += 1
+
+    return {
+        "running_count": running,
+        "stuck_count": stuck,
+        "healthy": stuck == 0,
+        "stale_threshold_seconds": stale_seconds,
+    }
+
+
+def _mark_stale_tasks_retryable(session_id: str, *, stale_seconds: int = 180) -> dict:
+    """Mark stale running tasks as retryable and return recovery summary."""
+    tasks = _load_persisted_session_tasks(session_id, limit=2000)
+    if not tasks:
+        return {"updated": 0, "task_keys": []}
+
+    now = datetime.utcnow()
+    stale_task_keys: list[str] = []
+    for task in tasks:
+        if str(task.get("status") or "").lower() != "running":
+            continue
+        updated_at = _parse_iso_datetime(str(task.get("updated_at") or ""))
+        if not updated_at:
+            stale_task_keys.append(str(task.get("task_key") or ""))
+            continue
+        if updated_at.tzinfo is not None:
+            updated_at = updated_at.replace(tzinfo=None)
+        age = (now - updated_at).total_seconds()
+        if age > stale_seconds:
+            stale_task_keys.append(str(task.get("task_key") or ""))
+
+    stale_task_keys = [k for k in stale_task_keys if k]
+    if not stale_task_keys:
+        return {"updated": 0, "task_keys": []}
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        now_iso = datetime.utcnow().isoformat()
+        for task_key in stale_task_keys:
+            db.execute(
+                """
+                UPDATE gmaps_session_tasks
+                SET status='retryable',
+                    last_error=CASE
+                        WHEN COALESCE(last_error, '')='' THEN 'Marked retryable by stale-task recovery'
+                        ELSE last_error || ' | Marked retryable by stale-task recovery'
+                    END,
+                    finished_at=?,
+                    updated_at=?
+                WHERE session_id=? AND task_key=? AND status='running'
+                """,
+                (now_iso, now_iso, session_id, task_key),
+            )
+        db.commit()
+        db.close()
+    except Exception as exc:
+        log.error(f"Failed to recover stale tasks for {session_id}: {exc}")
+        return {"updated": 0, "task_keys": []}
+
+    return {"updated": len(stale_task_keys), "task_keys": stale_task_keys}
+
+
+def _load_gmaps_task_record(session_id: str, task_key: str) -> dict | None:
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            """
+                 SELECT task_key, phase, status, attempt_count, max_attempts,
+                   retry_backoff_seconds, retry_cooldown_until,
+                   last_retry_reason, last_retry_at, updated_at
+            FROM gmaps_session_tasks
+            WHERE session_id=? AND task_key=?
+            LIMIT 1
+            """,
+            (session_id, task_key),
+        ).fetchone()
+        db.close()
+        if not row:
+            return None
+        return {
+            "task_key": row["task_key"],
+            "phase": row["phase"],
+            "status": str(row["status"] or "pending").lower(),
+            "attempt_count": int(row["attempt_count"] or 0),
+            "max_attempts": int(row["max_attempts"] or _TASK_RETRY_MAX_ATTEMPTS_DEFAULT),
+            "retry_backoff_seconds": int(row["retry_backoff_seconds"] or _TASK_RETRY_BACKOFF_SECONDS_DEFAULT),
+            "retry_cooldown_until": row["retry_cooldown_until"],
+            "last_retry_reason": row["last_retry_reason"] or "",
+            "last_retry_at": row["last_retry_at"],
+            "updated_at": row["updated_at"],
+        }
+    except Exception:
+        return None
+
+
+def _record_retry_blocked(session_id: str, task_key: str, reason: str):
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        now_iso = datetime.utcnow().isoformat()
+        db.execute(
+            """
+            UPDATE gmaps_session_tasks
+            SET last_retry_reason=?, updated_at=?
+            WHERE session_id=? AND task_key=?
+            """,
+            ((reason or "")[:500], now_iso, session_id, task_key),
+        )
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+
+
+def _enforce_task_retry_guard(job_id: str, state: dict, task_key: str):
+    now = datetime.utcnow()
+    task = _load_gmaps_task_record(job_id, task_key)
+    if not task:
+        return None
+
+    status = str(task.get("status") or "pending").lower()
+    if status == "running":
+        reason = f"Retry blocked for {task_key}: task is already running"
+        _record_retry_blocked(job_id, task_key, reason)
+        _persist_gmaps_event(
+            state,
+            "task_retry_blocked",
+            reason,
+            severity="warning",
+            payload={"task_key": task_key, "reason": "already_running"},
+        )
+        return jsonify({"error": "Task is already running.", "task_key": task_key}), 409
+
+    attempt_count = int(task.get("attempt_count") or 0)
+    max_attempts = max(1, int(task.get("max_attempts") or _TASK_RETRY_MAX_ATTEMPTS_DEFAULT))
+    if attempt_count >= max_attempts:
+        reason = f"Retry blocked for {task_key}: max attempts reached ({attempt_count}/{max_attempts})"
+        _record_retry_blocked(job_id, task_key, reason)
+        _persist_gmaps_event(
+            state,
+            "task_retry_blocked",
+            reason,
+            severity="warning",
+            payload={
+                "task_key": task_key,
+                "reason": "max_attempts_reached",
+                "attempt_count": attempt_count,
+                "max_attempts": max_attempts,
+            },
+        )
+        return jsonify({
+            "error": "Task retry attempts exhausted.",
+            "task_key": task_key,
+            "attempt_count": attempt_count,
+            "max_attempts": max_attempts,
+        }), 409
+
+    cooldown_until_raw = str(task.get("retry_cooldown_until") or "").strip()
+    cooldown_until = _parse_iso_datetime(cooldown_until_raw)
+    if cooldown_until:
+        if cooldown_until.tzinfo is not None:
+            cooldown_until = cooldown_until.replace(tzinfo=None)
+        if cooldown_until > now:
+            wait_seconds = int((cooldown_until - now).total_seconds())
+            reason = f"Retry blocked for {task_key}: cooldown active ({wait_seconds}s remaining)"
+            _record_retry_blocked(job_id, task_key, reason)
+            _persist_gmaps_event(
+                state,
+                "task_retry_blocked",
+                reason,
+                severity="warning",
+                payload={
+                    "task_key": task_key,
+                    "reason": "cooldown_active",
+                    "retry_after_seconds": wait_seconds,
+                },
+            )
+            return jsonify({
+                "error": "Retry cooldown is active.",
+                "task_key": task_key,
+                "retry_after_seconds": wait_seconds,
+                "retry_cooldown_until": cooldown_until_raw,
+            }), 429
+
+    return None
+
+
+def _operator_allowed_for_user(user_row) -> bool:
+    if not user_row:
+        return False
+    if _OPERATOR_OVERRIDE_ALL:
+        return True
+    email = str(user_row["email"] or "").strip().lower()
+    return bool(email and email in _OPERATOR_EMAIL_ALLOWLIST)
+
+
+def _reset_task_attempts(job_id: str, state: dict, task_key: str, *, reason: str, actor_email: str):
+    task = _load_gmaps_task_record(job_id, task_key)
+    if not task:
+        return jsonify({"error": "Task not found.", "task_key": task_key}), 404
+
+    if str(task.get("status") or "").lower() == "running":
+        return jsonify({"error": "Cannot reset attempts while task is running.", "task_key": task_key}), 409
+
+    now_iso = datetime.utcnow().isoformat()
+    safe_reason = (reason or "operator_reset_attempts")[:300]
+
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute(
+            """
+            UPDATE gmaps_session_tasks
+            SET attempt_count=0,
+                retry_cooldown_until=NULL,
+                last_retry_reason=?,
+                last_retry_at=?,
+                status=CASE
+                    WHEN status IN ('failed', 'canceled', 'retryable') THEN 'retryable'
+                    ELSE status
+                END,
+                updated_at=?
+            WHERE session_id=? AND task_key=?
+            """,
+            (f"operator_reset:{safe_reason}", now_iso, now_iso, job_id, task_key),
+        )
+        db.commit()
+        db.close()
+    except Exception as exc:
+        return jsonify({"error": f"Failed to reset attempts: {exc}"}), 500
+
+    _persist_gmaps_event(
+        state,
+        "task_attempts_reset",
+        f"Operator reset attempts for {task_key}",
+        payload={
+            "task_key": task_key,
+            "reason": safe_reason,
+            "actor": actor_email,
+        },
+    )
+
+    return jsonify({
+        "message": "Task attempts reset.",
+        "job_id": job_id,
+        "task_key": task_key,
+        "action": "reset_attempts",
+    })
+
+
+def _run_auto_stale_task_sweeper() -> dict:
+    """Automatically recover stale running tasks on a throttled interval."""
+    global _last_auto_sweep_at
+
+    if not _AUTO_SWEEP_ENABLED:
+        return {"swept_sessions": 0, "recovered_tasks": 0}
+
+    now_ts = time.time()
+    if (now_ts - _last_auto_sweep_at) < _AUTO_SWEEP_INTERVAL_SECONDS:
+        return {"swept_sessions": 0, "recovered_tasks": 0}
+
+    if not _auto_sweep_lock.acquire(blocking=False):
+        return {"swept_sessions": 0, "recovered_tasks": 0}
+
+    swept_sessions = 0
+    recovered_tasks = 0
+    try:
+        now_ts = time.time()
+        if (now_ts - _last_auto_sweep_at) < _AUTO_SWEEP_INTERVAL_SECONDS:
+            return {"swept_sessions": 0, "recovered_tasks": 0}
+
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            """
+            SELECT DISTINCT session_id
+            FROM gmaps_session_tasks
+            WHERE status='running'
+            """
+        ).fetchall()
+        db.close()
+
+        session_ids = [str(r["session_id"] or "").strip() for r in rows if str(r["session_id"] or "").strip()]
+        for session_id in session_ids:
+            recovered = _mark_stale_tasks_retryable(session_id, stale_seconds=_AUTO_SWEEP_STALE_SECONDS)
+            updated = int(recovered.get("updated") or 0)
+            if updated <= 0:
+                continue
+
+            swept_sessions += 1
+            recovered_tasks += updated
+            task_keys = recovered.get("task_keys") or []
+
+            state = get_job_state(session_id) or _load_persisted_session_state(session_id)
+            if state:
+                if "extract_main" in task_keys:
+                    state["phase"] = "extract"
+                    state["extraction_status"] = "retryable"
+                if "contacts_main" in task_keys:
+                    state["phase"] = state.get("phase") or "contacts"
+                    state["contacts_status"] = "retryable"
+                state["status"] = "PARTIAL"
+                state["updated_at"] = datetime.utcnow().isoformat()
+                state["message"] = f"Auto-recovered {updated} stale task(s) to retryable state."
+                _append_job_log(state, state["message"], state.get("progress", 0))
+                _save_job_state_and_persist(session_id, state)
+
+                _persist_gmaps_event(
+                    state,
+                    "auto_stale_sweep_recovered",
+                    state["message"],
+                    payload={"updated": updated, "task_keys": task_keys},
+                )
+
+        _last_auto_sweep_at = time.time()
+        return {"swept_sessions": swept_sessions, "recovered_tasks": recovered_tasks}
+    except Exception as exc:
+        log.error(f"Automatic stale-task sweep failed: {exc}")
+        return {"swept_sessions": 0, "recovered_tasks": 0}
+    finally:
+        _auto_sweep_lock.release()
+
+
+def _run_auto_retention_cleanup() -> dict:
+    """Delete old events/logs/tasks on a throttled schedule."""
+    global _last_retention_at, _last_retention_summary
+
+    if not _RETENTION_ENABLED:
+        return {"events_deleted": 0, "logs_deleted": 0, "tasks_deleted": 0}
+
+    now_ts = time.time()
+    if (now_ts - _last_retention_at) < _RETENTION_INTERVAL_SECONDS:
+        return {"events_deleted": 0, "logs_deleted": 0, "tasks_deleted": 0}
+
+    if not _retention_lock.acquire(blocking=False):
+        return {"events_deleted": 0, "logs_deleted": 0, "tasks_deleted": 0}
+
+    try:
+        now_ts = time.time()
+        if (now_ts - _last_retention_at) < _RETENTION_INTERVAL_SECONDS:
+            return {"events_deleted": 0, "logs_deleted": 0, "tasks_deleted": 0}
+
+        db = sqlite3.connect(DB_PATH)
+        db.execute("PRAGMA journal_mode=WAL")
+
+        cur = db.execute(
+            """
+            DELETE FROM gmaps_session_events
+            WHERE julianday(created_at) < julianday('now') - ?
+            """,
+            (float(_RETENTION_EVENTS_DAYS),),
+        )
+        events_deleted = int(cur.rowcount or 0)
+
+        cur = db.execute(
+            """
+            DELETE FROM gmaps_session_logs
+            WHERE julianday(created_at) < julianday('now') - ?
+            """,
+            (float(_RETENTION_LOGS_DAYS),),
+        )
+        logs_deleted = int(cur.rowcount or 0)
+
+        cur = db.execute(
+            """
+            DELETE FROM gmaps_session_tasks
+            WHERE status IN ('completed', 'failed', 'canceled', 'retryable')
+              AND julianday(updated_at) < julianday('now') - ?
+            """,
+            (float(_RETENTION_TASKS_DAYS),),
+        )
+        tasks_deleted = int(cur.rowcount or 0)
+
+        db.commit()
+        db.close()
+
+        _last_retention_at = time.time()
+        _last_retention_summary = {
+            "last_run_at": datetime.utcnow().isoformat(),
+            "events_deleted": events_deleted,
+            "logs_deleted": logs_deleted,
+            "tasks_deleted": tasks_deleted,
+            "error": None,
+        }
+        if events_deleted or logs_deleted or tasks_deleted:
+            log.info(
+                "Retention cleanup: events=%s logs=%s tasks=%s",
+                events_deleted,
+                logs_deleted,
+                tasks_deleted,
+            )
+
+        return {
+            "events_deleted": events_deleted,
+            "logs_deleted": logs_deleted,
+            "tasks_deleted": tasks_deleted,
+        }
+    except Exception as exc:
+        log.error(f"Retention cleanup failed: {exc}")
+        _last_retention_summary = {
+            "last_run_at": datetime.utcnow().isoformat(),
+            "events_deleted": 0,
+            "logs_deleted": 0,
+            "tasks_deleted": 0,
+            "error": str(exc),
+        }
+        return {"events_deleted": 0, "logs_deleted": 0, "tasks_deleted": 0}
+    finally:
+        _retention_lock.release()
+
+
+def _load_archive_rows_for_user(user_id: int, table_name: str, older_than_days: int, limit: int) -> list[dict]:
+    table_key = str(table_name or "").strip().lower()
+    days = max(1, int(older_than_days))
+    safe_limit = int(max(1, min(limit, 20000)))
+
+    if table_key == "events":
+        query = """
+            SELECT session_id, user_id, created_at, event_type, severity,
+                   phase, status, progress, message, payload
+            FROM gmaps_session_events
+            WHERE user_id=? AND julianday(created_at) < julianday('now') - ?
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+        """
+    elif table_key == "logs":
+        query = """
+            SELECT session_id, user_id, created_at, phase, progress, message
+            FROM gmaps_session_logs
+            WHERE user_id=? AND julianday(created_at) < julianday('now') - ?
+            ORDER BY datetime(created_at) DESC, id DESC
+            LIMIT ?
+        """
+    elif table_key == "tasks":
+        query = """
+            SELECT session_id, user_id, updated_at, task_key, phase, status,
+                   attempt_count, max_attempts, retry_backoff_seconds,
+                   retry_cooldown_until, last_retry_reason, last_retry_at,
+                   last_error, payload
+            FROM gmaps_session_tasks
+            WHERE user_id=? AND julianday(updated_at) < julianday('now') - ?
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT ?
+        """
+    else:
+        return []
+
+    db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
+    rows = db.execute(query, (int(user_id), float(days), safe_limit)).fetchall()
+    db.close()
+    return [dict(r) for r in rows]
+
+
+def _select_resume_anchor(session_id: str, state: dict) -> dict:
+    """Select the latest safe checkpoint to anchor resume actions."""
+    checkpoints = _load_persisted_session_events(session_id, limit=300)
+    if not checkpoints:
+        return {
+            "session_id": session_id,
+            "event_type": "none",
+            "at": None,
+            "suggested_action": "restart_extract",
+        }
+
+    safe_types = {
+        "extract_started",
+        "extract_completed",
+        "extract_partial",
+        "contacts_started",
+        "contacts_paused",
+        "contacts_completed",
+    }
+    latest = None
+    for event in reversed(checkpoints):
+        if event.get("event_type") in safe_types and event.get("severity") != "error":
+            latest = event
+            break
+
+    if not latest:
+        return {
+            "session_id": session_id,
+            "event_type": "none",
+            "at": None,
+            "suggested_action": "restart_extract",
+        }
+
+    event_type = str(latest.get("event_type") or "none")
+    if event_type in ("extract_started",):
+        action = "resume_or_restart_extract"
+        task_key = "extract_main"
+    elif event_type in ("extract_completed", "extract_partial"):
+        action = "start_or_resume_contacts"
+        task_key = "contacts_main"
+    elif event_type in ("contacts_started", "contacts_paused"):
+        action = "resume_contacts"
+        task_key = "contacts_main"
+    elif event_type == "contacts_completed":
+        action = "completed_no_resume_needed"
+        task_key = None
+    else:
+        action = "restart_extract"
+        task_key = "extract_main"
+
+    return {
+        "session_id": session_id,
+        "event_type": event_type,
+        "phase": latest.get("phase"),
+        "status": latest.get("status"),
+        "progress": latest.get("progress"),
+        "message": latest.get("message"),
+        "at": latest.get("at"),
+        "suggested_action": action,
+        "suggested_task_key": task_key,
+    }
+
+
+def _retry_extract_task(job_id: str, state: dict, *, force: bool = False, force_reason: str | None = None):
+    if not force:
+        blocked = _enforce_task_retry_guard(job_id, state, "extract_main")
+    else:
+        blocked = None
+    if blocked:
+        return blocked
+
+    payload = state.get("payload") if isinstance(state.get("payload"), dict) else None
+    if not payload:
+        return jsonify({"error": "No saved payload found for this session."}), 400
+
+    payload = dict(payload)
+    payload["crawl_contacts"] = False
+
+    state.update({
+        "status": "PENDING",
+        "phase": "extract",
+        "extraction_status": "pending",
+        "contacts_status": "pending",
+        "progress": 0,
+        "results": [],
+        "results_count": 0,
+        "lead_count": 0,
+        "stop_requested": False,
+        "contact_paused": False,
+        "contact_stop_requested": False,
+        "message": "Retrying extraction task...",
+        "updated_at": datetime.utcnow().isoformat(),
+        "payload": payload,
+    })
+    _append_job_log(state, "Extraction task retry requested", 0)
+    _save_job_state_and_persist(job_id, state)
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="extract_main",
+        phase="extract",
+        status="running",
+        payload={
+            "trigger": "force_retry_task" if force else "retry_task",
+            "force": bool(force),
+            "force_reason": (force_reason or "")[:300],
+        },
+        retry_reason=(f"force_override:{(force_reason or 'operator_override')[:120]}" if force else "deterministic_retry"),
+    )
+    _persist_gmaps_event(
+        state,
+        "task_force_retry_requested" if force else "task_retry_requested",
+        (
+            f"Forced retry requested for extract_main ({(force_reason or 'operator_override')[:120]})"
+            if force
+            else "Deterministic retry requested for extract_main"
+        ),
+        payload={
+            "task_key": "extract_main",
+            "force": bool(force),
+            "force_reason": (force_reason or "")[:300],
+        },
+    )
+
+    t = threading.Thread(target=_run_scrape_in_thread, args=(job_id, payload), daemon=True)
+    t.start()
+    return jsonify({
+        "message": "Forced extraction retry started." if force else "Extraction retry started.",
+        "job_id": job_id,
+        "task_key": "extract_main",
+        "force": bool(force),
+    })
+
+
+def _retry_contacts_task(job_id: str, state: dict, *, force: bool = False, force_reason: str | None = None):
+    if not force:
+        blocked = _enforce_task_retry_guard(job_id, state, "contacts_main")
+    else:
+        blocked = None
+    if blocked:
+        return blocked
+
+    if str(state.get("contacts_status") or "").lower() == "running":
+        return jsonify({"message": "Contact retrieval already running.", "job_id": job_id, "task_key": "contacts_main"})
+
+    leads = state.get("results") if isinstance(state.get("results"), list) else []
+    if not leads:
+        leads = _load_persisted_session_leads(job_id)
+        if leads:
+            state["results"] = leads
+            state["results_count"] = len(leads)
+            state["lead_count"] = len(leads)
+
+    if not leads:
+        return jsonify({"error": "No extracted leads found for contacts retry."}), 400
+
+    state.update({
+        "contact_paused": False,
+        "contact_stop_requested": False,
+        "phase": "contacts",
+        "extraction_status": "completed",
+        "contacts_status": "running",
+        "status": "RUNNING",
+        "message": "Retrying contact retrieval task...",
+        "updated_at": datetime.utcnow().isoformat(),
+    })
+    _append_job_log(state, "Contact retrieval task retry requested", state.get("progress", 0))
+    _save_job_state_and_persist(job_id, state)
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="contacts_main",
+        phase="contacts",
+        status="running",
+        payload={
+            "trigger": "force_retry_task" if force else "retry_task",
+            "force": bool(force),
+            "force_reason": (force_reason or "")[:300],
+        },
+        retry_reason=(f"force_override:{(force_reason or 'operator_override')[:120]}" if force else "deterministic_retry"),
+    )
+    _persist_gmaps_event(
+        state,
+        "task_force_retry_requested" if force else "task_retry_requested",
+        (
+            f"Forced retry requested for contacts_main ({(force_reason or 'operator_override')[:120]})"
+            if force
+            else "Deterministic retry requested for contacts_main"
+        ),
+        payload={
+            "task_key": "contacts_main",
+            "force": bool(force),
+            "force_reason": (force_reason or "")[:300],
+        },
+    )
+
+    t = threading.Thread(target=_run_contact_retrieval_thread, args=(job_id,), daemon=True)
+    t.start()
+    return jsonify({
+        "message": "Forced contacts retry started." if force else "Contacts retry started.",
+        "job_id": job_id,
+        "task_key": "contacts_main",
+        "force": bool(force),
+    })
+
+
+def _load_session_leads_filtered(session_id: str, completion: str = "all", limit: int = 500) -> list[dict]:
+    completion = (completion or "all").strip().lower()
+    where_extra = ""
+    params: list = [session_id]
+    if completion == "complete":
+        where_extra = " AND is_complete=1"
+    elif completion == "incomplete":
+        where_extra = " AND is_complete=0"
+
+    params.append(int(max(1, min(limit, 2000))))
+    try:
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            f"""
+            SELECT payload
+            FROM gmaps_session_leads
+            WHERE session_id=?{where_extra}
+            ORDER BY datetime(updated_at) DESC, id DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        db.close()
+        leads = []
+        for row in rows:
+            try:
+                leads.append(json.loads(row["payload"] or "{}"))
+            except Exception:
+                continue
+        return leads
+    except Exception:
+        return []
 
 
 def _parse_iso_datetime(value: str) -> datetime | None:
@@ -180,6 +2398,7 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
         )
         update = {
             "status": "RUNNING",
+            "extraction_status": "running",
             "progress": max(0, min(100, percent)),
             "message": message,
             "results_count": results_count,
@@ -189,17 +2408,40 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
         if isinstance(snapshot.get("results"), list):
             update["results"] = snapshot["results"]
             update["results_count"] = len(update["results"])
-        current = get_job_state(job_id) or {}
+        current = _load_job_state_with_fallback(job_id) or {}
         current.update(update)
-        save_job_state(job_id, current)
+        _append_job_log(current, message, percent)
+        _save_job_state_and_persist(job_id, current)
 
     def should_stop() -> bool:
         return is_job_stop_requested(job_id)
 
     try:
-        state = get_job_state(job_id) or {}
-        state.update({"status": "RUNNING", "message": "Worker started", "updated_at": datetime.utcnow().isoformat()})
-        save_job_state(job_id, state)
+        state = _load_job_state_with_fallback(job_id) or {}
+        state.update({
+            "status": "RUNNING",
+            "phase": "extract",
+            "extraction_status": "running",
+            "contacts_status": "pending",
+            "message": "Worker started",
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        _append_job_log(state, "Extraction started", 0)
+        _save_job_state_and_persist(job_id, state)
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(state.get("user_id") or 0),
+            task_key="extract_main",
+            phase="extract",
+            status="running",
+            payload={"keyword": state.get("keyword"), "place": state.get("place")},
+        )
+        _persist_gmaps_event(
+            state,
+            "extract_started",
+            "Extraction phase started",
+            payload={"job_id": job_id},
+        )
 
         result = run_scraper_job(
             payload=payload,
@@ -211,7 +2453,7 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
 
         # Use completed results, but fall back to whatever partial data was saved
         final_leads = result.get("leads", [])
-        existing_state = get_job_state(job_id) or {}
+        existing_state = _load_job_state_with_fallback(job_id) or {}
         existing_leads = existing_state.get("results", [])
 
         # Keep whichever set has more data
@@ -222,10 +2464,13 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
         final_state.update({
             "status": final_status,
             "progress": 100,
+            "phase": "extract",
+            "extraction_status": "completed" if final_status == "COMPLETED" else "partial",
+            "contacts_status": "pending",
             "message": (
                 f"Stopped with {len(final_leads)} leads."
                 if final_status == "PARTIAL"
-                else f"Done! Found {len(final_leads)} leads."
+                else f"List extraction complete. Found {len(final_leads)} leads."
             ),
             "results_count": len(final_leads),
             "results": final_leads,
@@ -233,16 +2478,37 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
             "finished_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         })
-        save_job_state(job_id, final_state)
+        _append_job_log(final_state, final_state["message"], 100)
+        _save_job_state_and_persist(job_id, final_state)
+        if final_status != "COMPLETED":
+            _persist_partial_snapshot_checkpoint(final_state, reason="extract_partial")
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(final_state.get("user_id") or 0),
+            task_key="extract_main",
+            phase="extract",
+            status="completed" if final_status == "COMPLETED" else "failed",
+            payload={"results_count": len(final_leads), "final_status": final_status},
+            error=None if final_status == "COMPLETED" else final_state.get("message"),
+        )
+        _persist_gmaps_event(
+            final_state,
+            "extract_completed" if final_status == "COMPLETED" else "extract_partial",
+            final_state["message"],
+            payload={"results_count": len(final_leads)},
+        )
 
     except Exception as exc:
         log.error(f"Scrape job {job_id} failed: {exc}")
         # On failure, preserve whatever partial results we have
-        failed_state = get_job_state(job_id) or {}
+        failed_state = _load_job_state_with_fallback(job_id) or {}
         existing_leads = failed_state.get("results", [])
         failed_state.update({
             "status": "PARTIAL" if existing_leads else "FAILED",
             "progress": 100,
+            "phase": "extract",
+            "extraction_status": "partial" if existing_leads else "failed",
+            "contacts_status": "pending",
             "message": (
                 f"Error occurred but saved {len(existing_leads)} leads."
                 if existing_leads
@@ -252,7 +2518,384 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
             "finished_at": datetime.utcnow().isoformat(),
             "updated_at": datetime.utcnow().isoformat(),
         })
-        save_job_state(job_id, failed_state)
+        _append_job_log(failed_state, failed_state["message"], 100)
+        _save_job_state_and_persist(job_id, failed_state)
+        _persist_partial_snapshot_checkpoint(
+            failed_state,
+            reason=("extract_failed_with_partial" if existing_leads else "extract_failed_no_partial"),
+        )
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(failed_state.get("user_id") or 0),
+            task_key="extract_main",
+            phase="extract",
+            status="failed",
+            payload={"saved_results": len(existing_leads)},
+            error=str(exc),
+        )
+        _persist_gmaps_event(
+            failed_state,
+            "extract_failed",
+            failed_state["message"],
+            severity="error",
+            payload={"error": str(exc), "saved_results": len(existing_leads)},
+        )
+
+
+def _run_contact_retrieval_thread(job_id: str):
+    """Background thread that enriches existing extracted leads with website contacts."""
+    scraper = None
+    try:
+        state = _load_job_state_with_fallback(job_id) or {}
+        leads = state.get("results") if isinstance(state.get("results"), list) else []
+        if not leads:
+            state.update({
+                "contacts_status": "failed",
+                "message": "No leads available for contact retrieval.",
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+            _append_job_log(state, state["message"], state.get("progress", 0))
+            _save_job_state_and_persist(job_id, state)
+            _upsert_gmaps_task(
+                session_id=job_id,
+                user_id=int(state.get("user_id") or 0),
+                task_key="contacts_main",
+                phase="contacts",
+                status="failed",
+                payload={"reason": "no_leads"},
+                error="No leads available for contact retrieval",
+            )
+            _persist_gmaps_event(
+                state,
+                "contacts_failed",
+                state["message"],
+                severity="error",
+                payload={"reason": "no_leads"},
+            )
+            return
+
+        state.update({
+            "status": "RUNNING",
+            "phase": "contacts",
+            "extraction_status": "completed",
+            "contacts_status": "running",
+            "contact_stop_requested": False,
+            "message": f"Starting contact retrieval for {len(leads)} leads...",
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        _append_job_log(state, state["message"], 0)
+        _save_job_state_and_persist(job_id, state)
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(state.get("user_id") or 0),
+            task_key="contacts_main",
+            phase="contacts",
+            status="running",
+            payload={"lead_count": len(leads)},
+        )
+        _persist_gmaps_event(
+            state,
+            "contacts_started",
+            state["message"],
+            payload={"lead_count": len(leads)},
+        )
+
+        scraper = GoogleMapsScraper(headless=True)
+
+        def _should_stop() -> bool:
+            current = _load_job_state_with_fallback(job_id) or {}
+            return bool(current.get("contact_stop_requested", False))
+
+        def _should_pause() -> bool:
+            current = _load_job_state_with_fallback(job_id) or {}
+            return bool(current.get("contact_paused", False))
+
+        chunk_plan = _build_contacts_chunks(leads, _CONTACT_TASK_CHUNK_SIZE)
+        total_chunks = max(1, len(chunk_plan))
+        completed_chunk_outputs = _load_completed_chunk_outputs(job_id, "contacts_main")
+
+        merged_by_uid: dict[str, dict] = {}
+        for outputs in completed_chunk_outputs.values():
+            for item in outputs:
+                if not isinstance(item, dict):
+                    continue
+                uid = _ensure_lead_uid(item)
+                merged_by_uid[uid] = item
+
+        failed_chunks = 0
+        processed_chunks = 0
+
+        for chunk in chunk_plan:
+            if _should_stop() or _should_pause():
+                break
+
+            chunk_index = int(chunk.get("chunk_index") or 1)
+            chunk_key = str(chunk.get("chunk_key") or "")
+            chunk_leads = chunk.get("leads") if isinstance(chunk.get("leads"), list) else []
+            if not chunk_key:
+                continue
+
+            if chunk_key in completed_chunk_outputs:
+                processed_chunks += 1
+                for item in completed_chunk_outputs[chunk_key]:
+                    if not isinstance(item, dict):
+                        continue
+                    uid = _ensure_lead_uid(item)
+                    merged_by_uid[uid] = item
+
+                current = _load_job_state_with_fallback(job_id) or {}
+                overall_percent = int((processed_chunks / total_chunks) * 100)
+                current.update({
+                    "status": "RUNNING",
+                    "phase": "contacts",
+                    "extraction_status": "completed",
+                    "contacts_status": "running",
+                    "progress": max(0, min(100, overall_percent)),
+                    "message": f"Resumed checkpoint chunk {chunk_index}/{total_chunks}.",
+                    "results": list(merged_by_uid.values()),
+                    "results_count": len(merged_by_uid),
+                    "lead_count": len(merged_by_uid),
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+                _append_job_log(current, current["message"], overall_percent)
+                _save_job_state_and_persist(job_id, current)
+                continue
+
+            _upsert_gmaps_task_chunk(
+                session_id=job_id,
+                user_id=int(state.get("user_id") or 0),
+                task_key="contacts_main",
+                chunk_key=chunk_key,
+                status="running",
+                payload={"chunk_index": chunk_index, "total_chunks": total_chunks, "lead_count": len(chunk_leads)},
+            )
+            _persist_gmaps_event(
+                state,
+                "contacts_chunk_started",
+                f"Contacts chunk {chunk_index}/{total_chunks} started",
+                payload={"chunk_key": chunk_key, "chunk_index": chunk_index, "total_chunks": total_chunks},
+            )
+
+            def _progress(message: str, percent: int):
+                current = _load_job_state_with_fallback(job_id) or {}
+                base = chunk_index - 1
+                overall = int(((base + (max(0, min(100, percent)) / 100.0)) / total_chunks) * 100)
+                current.update({
+                    "status": "RUNNING",
+                    "phase": "contacts",
+                    "extraction_status": "completed",
+                    "contacts_status": "running",
+                    "progress": max(0, min(100, overall)),
+                    "message": f"[Chunk {chunk_index}/{total_chunks}] {message}",
+                    "results": list(merged_by_uid.values()),
+                    "results_count": len(merged_by_uid),
+                    "lead_count": len(merged_by_uid),
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+                _append_job_log(current, current["message"], overall)
+                _save_job_state_and_persist(job_id, current)
+
+            try:
+                enriched_chunk = scraper.crawl_contacts_for_leads(
+                    leads=chunk_leads,
+                    progress_callback=_progress,
+                    should_stop=_should_stop,
+                    should_pause=_should_pause,
+                )
+                cleaned_chunk = clean_leads(enriched_chunk)
+                for item in cleaned_chunk:
+                    if not isinstance(item, dict):
+                        continue
+                    uid = _ensure_lead_uid(item)
+                    merged_by_uid[uid] = item
+
+                _upsert_gmaps_task_chunk(
+                    session_id=job_id,
+                    user_id=int(state.get("user_id") or 0),
+                    task_key="contacts_main",
+                    chunk_key=chunk_key,
+                    status="completed",
+                    payload={
+                        "chunk_index": chunk_index,
+                        "total_chunks": total_chunks,
+                        "output_leads": cleaned_chunk,
+                    },
+                )
+                _persist_gmaps_event(
+                    state,
+                    "contacts_chunk_completed",
+                    f"Contacts chunk {chunk_index}/{total_chunks} completed",
+                    payload={
+                        "chunk_key": chunk_key,
+                        "chunk_index": chunk_index,
+                        "total_chunks": total_chunks,
+                        "output_count": len(cleaned_chunk),
+                    },
+                )
+
+                processed_chunks += 1
+                current = _load_job_state_with_fallback(job_id) or {}
+                overall_percent = int((processed_chunks / total_chunks) * 100)
+                current.update({
+                    "status": "RUNNING",
+                    "phase": "contacts",
+                    "extraction_status": "completed",
+                    "contacts_status": "running",
+                    "progress": max(0, min(100, overall_percent)),
+                    "message": f"Completed contacts chunk {chunk_index}/{total_chunks}.",
+                    "results": list(merged_by_uid.values()),
+                    "results_count": len(merged_by_uid),
+                    "lead_count": len(merged_by_uid),
+                    "updated_at": datetime.utcnow().isoformat(),
+                })
+                _append_job_log(current, current["message"], overall_percent)
+                _save_job_state_and_persist(job_id, current)
+            except Exception as chunk_exc:
+                failed_chunks += 1
+                _upsert_gmaps_task_chunk(
+                    session_id=job_id,
+                    user_id=int(state.get("user_id") or 0),
+                    task_key="contacts_main",
+                    chunk_key=chunk_key,
+                    status="failed",
+                    payload={"chunk_index": chunk_index, "total_chunks": total_chunks},
+                    error=str(chunk_exc),
+                )
+                _persist_gmaps_event(
+                    state,
+                    "contacts_chunk_failed",
+                    f"Contacts chunk {chunk_index}/{total_chunks} failed",
+                    severity="error",
+                    payload={
+                        "chunk_key": chunk_key,
+                        "chunk_index": chunk_index,
+                        "total_chunks": total_chunks,
+                        "error": str(chunk_exc),
+                    },
+                )
+                continue
+
+        cleaned = clean_leads(list(merged_by_uid.values()))
+
+        current = _load_job_state_with_fallback(job_id) or {}
+        if current.get("contact_stop_requested") or current.get("contact_paused"):
+            current.update({
+                "status": "PARTIAL",
+                "phase": "contacts",
+                "extraction_status": "completed",
+                "contacts_status": "paused",
+                "results": cleaned,
+                "results_count": len(cleaned),
+                "lead_count": len(cleaned),
+                "message": f"Contact retrieval paused at {len(cleaned)} leads.",
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+        elif failed_chunks > 0:
+            current.update({
+                "status": "PARTIAL",
+                "phase": "contacts",
+                "extraction_status": "completed",
+                "contacts_status": "failed",
+                "results": cleaned,
+                "results_count": len(cleaned),
+                "lead_count": len(cleaned),
+                "message": (
+                    f"Contact retrieval finished with {failed_chunks} failed chunk(s). "
+                    f"Saved {len(cleaned)} leads."
+                ),
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+        else:
+            current.update({
+                "status": "COMPLETED",
+                "phase": "contacts",
+                "extraction_status": "completed",
+                "contacts_status": "completed",
+                "progress": 100,
+                "results": cleaned,
+                "results_count": len(cleaned),
+                "lead_count": len(cleaned),
+                "message": f"Contact retrieval complete for {len(cleaned)} leads.",
+                "updated_at": datetime.utcnow().isoformat(),
+            })
+        _append_job_log(current, current["message"], current.get("progress", 100))
+        _save_job_state_and_persist(job_id, current)
+        if current.get("contacts_status") == "paused":
+            _persist_partial_snapshot_checkpoint(current, reason="contacts_paused")
+        if current.get("contacts_status") in ("paused", "failed"):
+            _persist_gmaps_event(
+                current,
+                "contacts_checkpoint",
+                "Contacts task checkpoint persisted",
+                payload={
+                    "completed_chunks": int(processed_chunks),
+                    "total_chunks": int(total_chunks),
+                    "failed_chunks": int(failed_chunks),
+                    "results_count": len(cleaned),
+                },
+            )
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(current.get("user_id") or 0),
+            task_key="contacts_main",
+            phase="contacts",
+            status=(
+                "completed"
+                if current.get("contacts_status") == "completed"
+                else ("paused" if current.get("contacts_status") == "paused" else "failed")
+            ),
+            payload={"results_count": len(cleaned), "contacts_status": current.get("contacts_status")},
+            error=(
+                None
+                if current.get("contacts_status") in ("completed", "paused")
+                else current.get("message")
+            ),
+        )
+        _persist_gmaps_event(
+            current,
+            "contacts_paused" if current.get("contacts_status") == "paused" else "contacts_completed",
+            current["message"],
+            payload={"results_count": len(cleaned)},
+        )
+
+    except Exception as exc:
+        failed = _load_job_state_with_fallback(job_id) or {}
+        partial_leads = scraper.get_partial_leads() if scraper else []
+        if partial_leads:
+            failed["results"] = partial_leads
+            failed["results_count"] = len(partial_leads)
+            failed["lead_count"] = len(partial_leads)
+        failed.update({
+            "status": "PARTIAL",
+            "phase": "contacts",
+            "extraction_status": "completed",
+            "contacts_status": "failed",
+            "message": f"Contact retrieval failed: {str(exc)}",
+            "error": str(exc),
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        _append_job_log(failed, failed["message"], failed.get("progress", 0))
+        _save_job_state_and_persist(job_id, failed)
+        _persist_partial_snapshot_checkpoint(
+            failed,
+            reason=("contacts_failed_with_partial" if (failed.get("results") or []) else "contacts_failed_no_partial"),
+        )
+        _upsert_gmaps_task(
+            session_id=job_id,
+            user_id=int(failed.get("user_id") or 0),
+            task_key="contacts_main",
+            phase="contacts",
+            status="failed",
+            payload={"saved_results": len(failed.get("results") or [])},
+            error=str(exc),
+        )
+        _persist_gmaps_event(
+            failed,
+            "contacts_failed",
+            failed["message"],
+            severity="error",
+            payload={"error": str(exc), "saved_results": len(failed.get("results") or [])},
+        )
 
 
 
@@ -356,7 +2999,182 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS idx_email_tpl_user ON email_templates(user_id);
         CREATE INDEX IF NOT EXISTS idx_email_tpl_lead ON email_templates(lead_id);
+
+        CREATE TABLE IF NOT EXISTS gmaps_sessions (
+            session_id         TEXT PRIMARY KEY,
+            user_id            INTEGER NOT NULL,
+            keyword            TEXT DEFAULT '',
+            place              TEXT DEFAULT '',
+            max_leads          INTEGER,
+            phase              TEXT DEFAULT 'extract',
+            extraction_status  TEXT DEFAULT 'pending',
+            contacts_status    TEXT DEFAULT 'pending',
+            status             TEXT DEFAULT 'PENDING',
+            progress           INTEGER DEFAULT 0,
+            message            TEXT DEFAULT '',
+            results_count      INTEGER DEFAULT 0,
+            created_at         TEXT DEFAULT (datetime('now')),
+            updated_at         TEXT DEFAULT (datetime('now')),
+            finished_at        TEXT,
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_sessions_user_updated
+            ON gmaps_sessions(user_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS gmaps_session_leads (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            user_id            INTEGER NOT NULL,
+            lead_uid           TEXT NOT NULL,
+            business_name      TEXT DEFAULT '',
+            owner_name         TEXT DEFAULT '',
+            phone              TEXT DEFAULT '',
+            website            TEXT DEFAULT '',
+            email              TEXT DEFAULT '',
+            address            TEXT DEFAULT '',
+            rating             TEXT DEFAULT '',
+            reviews            TEXT DEFAULT '',
+            category           TEXT DEFAULT '',
+            latitude           TEXT DEFAULT '',
+            longitude          TEXT DEFAULT '',
+            facebook           TEXT DEFAULT '',
+            instagram          TEXT DEFAULT '',
+            twitter            TEXT DEFAULT '',
+            linkedin           TEXT DEFAULT '',
+            youtube            TEXT DEFAULT '',
+            tiktok             TEXT DEFAULT '',
+            pinterest          TEXT DEFAULT '',
+            stage              TEXT DEFAULT 'extract',
+            is_complete        INTEGER DEFAULT 0,
+            payload            TEXT DEFAULT '{}',
+            created_at         TEXT DEFAULT (datetime('now')),
+            updated_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(session_id, lead_uid),
+            FOREIGN KEY (session_id) REFERENCES gmaps_sessions(session_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_leads_session_updated
+            ON gmaps_session_leads(session_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_gmaps_leads_user_session
+            ON gmaps_session_leads(user_id, session_id);
+
+        CREATE TABLE IF NOT EXISTS gmaps_session_logs (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            user_id            INTEGER NOT NULL,
+            phase              TEXT DEFAULT 'extract',
+            progress           INTEGER,
+            message            TEXT DEFAULT '',
+            log_hash           TEXT NOT NULL,
+            created_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(session_id, log_hash),
+            FOREIGN KEY (session_id) REFERENCES gmaps_sessions(session_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_logs_session_created
+            ON gmaps_session_logs(session_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS gmaps_session_events (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            user_id            INTEGER NOT NULL,
+            event_type         TEXT NOT NULL,
+            severity           TEXT DEFAULT 'info',
+            phase              TEXT DEFAULT 'extract',
+            status             TEXT DEFAULT 'PENDING',
+            progress           INTEGER DEFAULT 0,
+            message            TEXT DEFAULT '',
+            payload            TEXT DEFAULT '{}',
+            event_hash         TEXT NOT NULL,
+            created_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(session_id, event_hash),
+            FOREIGN KEY (session_id) REFERENCES gmaps_sessions(session_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_events_session_created
+            ON gmaps_session_events(session_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS gmaps_session_tasks (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            user_id            INTEGER NOT NULL,
+            task_key           TEXT NOT NULL,
+            phase              TEXT DEFAULT 'extract',
+            status             TEXT DEFAULT 'pending',
+            attempt_count      INTEGER DEFAULT 0,
+            last_error         TEXT DEFAULT '',
+            payload            TEXT DEFAULT '{}',
+            max_attempts       INTEGER DEFAULT 3,
+            retry_backoff_seconds INTEGER DEFAULT 45,
+            retry_cooldown_until TEXT,
+            last_retry_reason  TEXT DEFAULT '',
+            last_retry_at      TEXT,
+            started_at         TEXT,
+            finished_at        TEXT,
+            created_at         TEXT DEFAULT (datetime('now')),
+            updated_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(session_id, task_key),
+            FOREIGN KEY (session_id) REFERENCES gmaps_sessions(session_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_tasks_session_updated
+            ON gmaps_session_tasks(session_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS gmaps_task_chunks (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            user_id            INTEGER NOT NULL,
+            task_key           TEXT NOT NULL,
+            chunk_key          TEXT NOT NULL,
+            status             TEXT DEFAULT 'pending',
+            attempt_count      INTEGER DEFAULT 0,
+            last_error         TEXT DEFAULT '',
+            payload            TEXT DEFAULT '{}',
+            started_at         TEXT,
+            finished_at        TEXT,
+            created_at         TEXT DEFAULT (datetime('now')),
+            updated_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE(session_id, task_key, chunk_key),
+            FOREIGN KEY (session_id) REFERENCES gmaps_sessions(session_id),
+            FOREIGN KEY (user_id) REFERENCES users(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_gmaps_task_chunks_session_task_updated
+            ON gmaps_task_chunks(session_id, task_key, updated_at DESC);
     """)
+    task_migrations = [
+        "ALTER TABLE gmaps_session_tasks ADD COLUMN max_attempts INTEGER DEFAULT 3",
+        "ALTER TABLE gmaps_session_tasks ADD COLUMN retry_backoff_seconds INTEGER DEFAULT 45",
+        "ALTER TABLE gmaps_session_tasks ADD COLUMN retry_cooldown_until TEXT",
+        "ALTER TABLE gmaps_session_tasks ADD COLUMN last_retry_reason TEXT DEFAULT ''",
+        "ALTER TABLE gmaps_session_tasks ADD COLUMN last_retry_at TEXT",
+    ]
+    for stmt in task_migrations:
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+
+    chunk_migrations = [
+        "ALTER TABLE gmaps_task_chunks ADD COLUMN last_error TEXT DEFAULT ''",
+        "ALTER TABLE gmaps_task_chunks ADD COLUMN payload TEXT DEFAULT '{}'",
+        "ALTER TABLE gmaps_task_chunks ADD COLUMN started_at TEXT",
+        "ALTER TABLE gmaps_task_chunks ADD COLUMN finished_at TEXT",
+    ]
+    for stmt in chunk_migrations:
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+
+    db.execute(
+        """
+        UPDATE gmaps_session_tasks
+        SET max_attempts=COALESCE(max_attempts, ?),
+            retry_backoff_seconds=COALESCE(retry_backoff_seconds, ?)
+        """,
+        (_TASK_RETRY_MAX_ATTEMPTS_DEFAULT, _TASK_RETRY_BACKOFF_SECONDS_DEFAULT),
+    )
+
     # Seed a demo license key if none exist
     cur = db.execute("SELECT COUNT(*) FROM license_keys")
     if cur.fetchone()[0] == 0:
@@ -367,6 +3185,9 @@ def init_db():
         )
     db.commit()
     db.close()
+
+    if pg_enabled():
+        pg_ensure_schema()
 
 
 init_db()
@@ -1460,6 +4281,7 @@ def save_gmaps_csv(leads: list[dict], filepath: str):
     if not leads:
         return
     fieldnames = [
+        "lead_uid",
         "business_name", "owner_name", "phone", "website", "email",
         "address", "rating", "reviews", "category",
         "facebook", "instagram", "twitter", "linkedin",
@@ -1530,6 +4352,13 @@ def email_outreach_tool():
     return render_template("email_outreach.html", active_page="email_outreach")
 
 
+@app.route("/sessions")
+@subscription_required
+def sessions_page():
+    """Google Maps sessions page."""
+    return render_template("sessions.html", active_page="sessions")
+
+
 # ============================================================
 # Google Maps API
 # ============================================================
@@ -1541,6 +4370,7 @@ def start_scrape():
     data = request.get_json()
     keyword = data.get("keyword", "").strip()
     place = data.get("place", "").strip()
+    max_leads = data.get("max_leads")
     map_selection = data.get("map_selection") if isinstance(data.get("map_selection"), dict) else None
 
     if not place and map_selection:
@@ -1553,40 +4383,82 @@ def start_scrape():
     if not keyword or not place:
         return jsonify({"error": "Both keyword and place are required (or select an area on map)."}), 400
 
+    if max_leads is not None:
+        try:
+            max_leads = int(max_leads)
+            if max_leads <= 0:
+                max_leads = None
+        except (TypeError, ValueError):
+            return jsonify({"error": "max_leads must be a number or omitted."}), 400
+
     job_id = str(uuid.uuid4())[:8]
 
     payload = {
         "job_id": job_id,
+        "tool": "gmaps",
         "keyword": keyword,
         "place": place,
         "map_selection": map_selection,
+        "max_leads": max_leads,
+        "crawl_contacts": False,
     }
 
     initial_state = {
         "job_id": job_id,
+        "tool": "gmaps",
+        "user_id": session["user_id"],
         "status": "PENDING",
+        "phase": "extract",
+        "extraction_status": "pending",
+        "contacts_status": "pending",
         "progress": 0,
         "message": "Starting scraper...",
         "keyword": keyword,
         "place": place,
+        "max_leads": max_leads,
         "results_count": 0,
         "results": [],
         "stop_requested": False,
+        "contact_paused": False,
+        "contact_stop_requested": False,
+        "payload": payload,
+        "logs": [{
+            "at": datetime.utcnow().isoformat(),
+            "message": "Session created",
+            "progress": 0,
+        }],
         "created_at": datetime.utcnow().isoformat(),
         "updated_at": datetime.utcnow().isoformat(),
     }
-    save_job_state(job_id, initial_state)
+    _save_job_state_and_persist(job_id, initial_state)
     _insert_history_direct(session["user_id"], job_id, "gmaps", keyword, place)
 
-    # Launch scraper in background thread
-    t = threading.Thread(
-        target=_run_scrape_in_thread,
-        args=(job_id, payload),
-        daemon=True,
-    )
-    t.start()
+    accepted, reason, pool = submit_extract_job(job_id, session["user_id"], _run_scrape_in_thread, job_id, payload)
+    if not accepted:
+        initial_state.update({
+            "status": "PENDING",
+            "message": "Extraction queued capacity reached. Retry shortly.",
+            "updated_at": datetime.utcnow().isoformat(),
+        })
+        _append_job_log(initial_state, f"Queue rejected ({reason})", 0)
+        _save_job_state_and_persist(job_id, initial_state)
+        _persist_gmaps_event(
+            initial_state,
+            "extract_queue_rejected",
+            "Extraction queue rejected job due to backpressure",
+            severity="warning",
+            payload={"reason": reason, "pool": pool},
+        )
+        return jsonify({"error": "Extraction queue is full. Please retry.", "reason": reason, "pool": pool}), 429
 
-    return jsonify({"job_id": job_id, "message": "Scraping started."}), 202
+    _persist_gmaps_event(
+        initial_state,
+        "extract_queue_accepted",
+        "Extraction job accepted by worker pool",
+        payload={"pool": pool},
+    )
+
+    return jsonify({"job_id": job_id, "message": "List extraction started."}), 202
 
 
 @app.route("/api/status/<job_id>")
@@ -1594,6 +4466,10 @@ def job_status(job_id):
     state = get_job_state(job_id)
     if state:
         return jsonify(_state_for_frontend(state))
+
+    persisted = _load_persisted_session_state(job_id)
+    if persisted:
+        return jsonify(_state_for_frontend(persisted))
 
     job = scraping_jobs.get(job_id)
     if not job:
@@ -1607,6 +4483,8 @@ def job_results(job_id):
     if state:
         lifecycle = str(state.get("status", "PENDING")).upper()
         leads = state.get("results", [])
+        if not leads:
+            leads = _load_persisted_session_leads(job_id)
         # Return results at ANY stage — partial or complete
         return jsonify({
             "leads": leads,
@@ -1614,6 +4492,18 @@ def job_results(job_id):
             "partial": lifecycle not in ("COMPLETED", "PARTIAL"),
             "status": lifecycle,
             "job": _state_for_frontend(state),
+        })
+
+    persisted = _load_persisted_session_state(job_id)
+    if persisted:
+        lifecycle = str(persisted.get("status", "PENDING")).upper()
+        leads = persisted.get("results", [])
+        return jsonify({
+            "leads": leads,
+            "total": len(leads),
+            "partial": lifecycle not in ("COMPLETED", "PARTIAL"),
+            "status": lifecycle,
+            "job": _state_for_frontend(persisted),
         })
 
     job = scraping_jobs.get(job_id)
@@ -1628,16 +4518,20 @@ def download_csv(job_id):
     if queue_state:
         leads = queue_state.get("results", [])
         if not leads:
+            leads = _load_persisted_session_leads(job_id)
+        if not leads:
             return jsonify({"error": "No data available for download yet."}), 400
 
         output = io.StringIO()
         fieldnames = [
+            "Lead ID",
             "Business Name", "Owner Name", "Phone", "Website", "Email",
             "Address", "Rating", "Reviews", "Category",
             "Facebook", "Instagram", "Twitter", "LinkedIn",
             "YouTube", "TikTok", "Pinterest",
         ]
         key_map = {
+            "Lead ID": "lead_uid",
             "Business Name": "business_name", "Owner Name": "owner_name",
             "Phone": "phone", "Website": "website", "Email": "email",
             "Address": "address", "Rating": "rating", "Reviews": "reviews",
@@ -1662,6 +4556,46 @@ def download_csv(job_id):
             headers={"Content-Disposition": f"attachment; filename={filename}"},
         )
 
+    persisted_state = _load_persisted_session_state(job_id)
+    if persisted_state:
+        leads = persisted_state.get("results", [])
+        if not leads:
+            return jsonify({"error": "No data available for download yet."}), 400
+
+        output = io.StringIO()
+        fieldnames = [
+            "Lead ID",
+            "Business Name", "Owner Name", "Phone", "Website", "Email",
+            "Address", "Rating", "Reviews", "Category",
+            "Facebook", "Instagram", "Twitter", "LinkedIn",
+            "YouTube", "TikTok", "Pinterest",
+        ]
+        key_map = {
+            "Lead ID": "lead_uid",
+            "Business Name": "business_name", "Owner Name": "owner_name",
+            "Phone": "phone", "Website": "website", "Email": "email",
+            "Address": "address", "Rating": "rating", "Reviews": "reviews",
+            "Category": "category", "Facebook": "facebook",
+            "Instagram": "instagram", "Twitter": "twitter",
+            "LinkedIn": "linkedin", "YouTube": "youtube",
+            "TikTok": "tiktok", "Pinterest": "pinterest",
+        }
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for lead in leads:
+            row = {display: lead.get(key, "N/A") for display, key in key_map.items()}
+            writer.writerow(row)
+
+        output.seek(0)
+        keyword = persisted_state.get("keyword", "leads")
+        place = persisted_state.get("place", "area")
+        filename = f"leads_{keyword}_{place}.csv".replace(" ", "_").lower()
+        return Response(
+            output.getvalue(),
+            mimetype="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+
     job = scraping_jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found."}), 404
@@ -1670,12 +4604,14 @@ def download_csv(job_id):
 
     output = io.StringIO()
     fieldnames = [
+        "Lead ID",
         "Business Name", "Owner Name", "Phone", "Website", "Email",
         "Address", "Rating", "Reviews", "Category",
         "Facebook", "Instagram", "Twitter", "LinkedIn",
         "YouTube", "TikTok", "Pinterest",
     ]
     key_map = {
+        "Lead ID": "lead_uid",
         "Business Name": "business_name", "Owner Name": "owner_name",
         "Phone": "phone", "Website": "website", "Email": "email",
         "Address": "address", "Rating": "rating", "Reviews": "reviews",
@@ -1702,9 +4638,36 @@ def download_csv(job_id):
 def stop_scrape(job_id):
     queue_state = get_job_state(job_id)
     if queue_state:
+        phase = str(queue_state.get("phase", "extract"))
         lifecycle = str(queue_state.get("status", "PENDING")).upper()
         if lifecycle in ("COMPLETED", "FAILED", "PARTIAL"):
             return jsonify({"message": f"Job already {lifecycle}."})
+
+        if phase == "contacts":
+            queue_state["contact_stop_requested"] = True
+            queue_state["contact_paused"] = True
+            queue_state["contacts_status"] = "paused"
+            queue_state["message"] = "Pause requested for contact retrieval..."
+            queue_state["updated_at"] = datetime.utcnow().isoformat()
+            _append_job_log(queue_state, queue_state["message"], queue_state.get("progress", 0))
+            _save_job_state_and_persist(job_id, queue_state)
+            _persist_partial_snapshot_checkpoint(queue_state, reason="contacts_pause_requested_api_stop")
+            _persist_gmaps_event(
+                queue_state,
+                "contacts_paused",
+                "Contact retrieval pause requested by user",
+                payload={"trigger": "api_stop"},
+            )
+            _upsert_gmaps_task(
+                session_id=job_id,
+                user_id=int(queue_state.get("user_id") or 0),
+                task_key="contacts_main",
+                phase="contacts",
+                status="paused",
+                payload={"trigger": "api_stop"},
+            )
+            return jsonify({"message": "Pause signal sent for contact retrieval."})
+
         set_job_stop_requested(job_id, True)
 
         pending = get_job_state(job_id) or queue_state
@@ -1712,7 +4675,15 @@ def stop_scrape(job_id):
             "message": "Stop requested. Finishing current step...",
             "updated_at": datetime.utcnow().isoformat(),
         })
-        save_job_state(job_id, pending)
+        _append_job_log(pending, pending["message"], pending.get("progress", 0))
+        _save_job_state_and_persist(job_id, pending)
+        _persist_partial_snapshot_checkpoint(pending, reason="extract_stop_requested_api_stop")
+        _persist_gmaps_event(
+            pending,
+            "extract_pause_requested",
+            "Extraction stop requested by user",
+            payload={"trigger": "api_stop"},
+        )
         return jsonify({"message": "Stop signal sent."})
 
     job = scraping_jobs.get(job_id)
@@ -1728,6 +4699,901 @@ def stop_scrape(job_id):
     job.status = "stopped"
     job.message = f"Stopped by user. Saved {len(job.leads)} leads."
     return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
+
+
+@app.route("/api/gmaps/contacts/start/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_start_contact_retrieval(job_id):
+    state = _load_job_state_with_fallback(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+
+    leads = state.get("results") if isinstance(state.get("results"), list) else []
+    if not leads:
+        return jsonify({"error": "No extracted leads found for this session."}), 400
+
+    if str(state.get("contacts_status", "pending")) == "running":
+        return jsonify({"error": "Contact retrieval is already running."}), 409
+
+    state["contact_paused"] = False
+    state["contact_stop_requested"] = False
+    state["phase"] = "contacts"
+    state["extraction_status"] = "completed"
+    state["contacts_status"] = "running"
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _append_job_log(state, "Contact retrieval requested", state.get("progress", 0))
+    _save_job_state_and_persist(job_id, state)
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="contacts_main",
+        phase="contacts",
+        status="running",
+        payload={"trigger": "contacts_start"},
+    )
+
+    accepted, reason, pool = submit_contact_job(job_id, state.get("user_id") or session["user_id"], _run_contact_retrieval_thread, job_id)
+    if not accepted:
+        state["contacts_status"] = "pending"
+        state["status"] = "PENDING"
+        state["message"] = "Contact queue full. Retry shortly."
+        state["updated_at"] = datetime.utcnow().isoformat()
+        _append_job_log(state, f"Contact queue rejected ({reason})", state.get("progress", 0))
+        _save_job_state_and_persist(job_id, state)
+        _persist_gmaps_event(
+            state,
+            "contacts_queue_rejected",
+            "Contacts queue rejected job due to backpressure",
+            severity="warning",
+            payload={"reason": reason, "pool": pool},
+        )
+        return jsonify({"error": "Contact queue is full. Please retry.", "reason": reason, "pool": pool}), 429
+
+    _persist_gmaps_event(
+        state,
+        "contacts_queue_accepted",
+        "Contact retrieval accepted by worker pool",
+        payload={"pool": pool},
+    )
+    return jsonify({"message": "Contact retrieval started.", "job_id": job_id})
+
+
+@app.route("/api/gmaps/contacts/pause/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_pause_contact_retrieval(job_id):
+    state = _load_job_state_with_fallback(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+
+    state["contact_paused"] = True
+    state["contacts_status"] = "paused"
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _append_job_log(state, "Contact retrieval paused", state.get("progress", 0))
+    _save_job_state_and_persist(job_id, state)
+    _persist_partial_snapshot_checkpoint(state, reason="contacts_pause_requested_endpoint")
+    _persist_gmaps_event(
+        state,
+        "contacts_paused",
+        "Contact retrieval paused by user",
+        payload={"trigger": "contacts_pause_endpoint"},
+    )
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="contacts_main",
+        phase="contacts",
+        status="paused",
+        payload={"trigger": "contacts_pause"},
+    )
+    return jsonify({"message": "Contact retrieval paused."})
+
+
+@app.route("/api/gmaps/contacts/resume/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_resume_contact_retrieval(job_id):
+    state = _load_job_state_with_fallback(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+
+    if str(state.get("contacts_status", "pending")) == "running":
+        return jsonify({"message": "Contact retrieval already running."})
+
+    state["contact_paused"] = False
+    state["contact_stop_requested"] = False
+    state["contacts_status"] = "running"
+    state["phase"] = "contacts"
+    state["extraction_status"] = "completed"
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _append_job_log(state, "Contact retrieval resumed", state.get("progress", 0))
+    _save_job_state_and_persist(job_id, state)
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="contacts_main",
+        phase="contacts",
+        status="running",
+        payload={"trigger": "contacts_resume"},
+    )
+
+    accepted, reason, pool = submit_contact_job(job_id, state.get("user_id") or session["user_id"], _run_contact_retrieval_thread, job_id)
+    if not accepted:
+        state["contacts_status"] = "pending"
+        state["status"] = "PENDING"
+        state["message"] = "Contact queue full. Retry shortly."
+        state["updated_at"] = datetime.utcnow().isoformat()
+        _append_job_log(state, f"Contact queue rejected ({reason})", state.get("progress", 0))
+        _save_job_state_and_persist(job_id, state)
+        _persist_gmaps_event(
+            state,
+            "contacts_queue_rejected",
+            "Contacts queue rejected resumed job due to backpressure",
+            severity="warning",
+            payload={"reason": reason, "pool": pool},
+        )
+        return jsonify({"error": "Contact queue is full. Please retry.", "reason": reason, "pool": pool}), 429
+
+    _persist_gmaps_event(
+        state,
+        "contacts_queue_accepted",
+        "Contact retrieval resume accepted by worker pool",
+        payload={"pool": pool},
+    )
+    return jsonify({"message": "Contact retrieval resumed.", "job_id": job_id})
+
+
+@app.route("/api/gmaps/contacts/restart/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_restart_contact_retrieval(job_id):
+    state = _load_job_state_with_fallback(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+
+    leads = state.get("results") if isinstance(state.get("results"), list) else []
+    if not leads:
+        return jsonify({"error": "No leads found for restart."}), 400
+
+    for lead in leads:
+        for key in ("email", "facebook", "instagram", "twitter", "linkedin", "youtube", "tiktok", "pinterest"):
+            if key in lead:
+                lead[key] = "N/A"
+
+    state["results"] = leads
+    state["results_count"] = len(leads)
+    state["contact_paused"] = False
+    state["contact_stop_requested"] = False
+    state["contacts_status"] = "running"
+    state["phase"] = "contacts"
+    state["extraction_status"] = "completed"
+    state["progress"] = 0
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _append_job_log(state, "Contact retrieval restarted", 0)
+    _save_job_state_and_persist(job_id, state)
+    _clear_task_chunks(job_id, "contacts_main")
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="contacts_main",
+        phase="contacts",
+        status="running",
+        payload={"trigger": "contacts_restart", "reset_results": True},
+    )
+
+    accepted, reason, pool = submit_contact_job(job_id, state.get("user_id") or session["user_id"], _run_contact_retrieval_thread, job_id)
+    if not accepted:
+        state["contacts_status"] = "pending"
+        state["status"] = "PENDING"
+        state["message"] = "Contact queue full. Retry shortly."
+        state["updated_at"] = datetime.utcnow().isoformat()
+        _append_job_log(state, f"Contact queue rejected ({reason})", state.get("progress", 0))
+        _save_job_state_and_persist(job_id, state)
+        _persist_gmaps_event(
+            state,
+            "contacts_queue_rejected",
+            "Contacts queue rejected restarted job due to backpressure",
+            severity="warning",
+            payload={"reason": reason, "pool": pool},
+        )
+        return jsonify({"error": "Contact queue is full. Please retry.", "reason": reason, "pool": pool}), 429
+
+    _persist_gmaps_event(
+        state,
+        "contacts_queue_accepted",
+        "Contact retrieval restart accepted by worker pool",
+        payload={"pool": pool},
+    )
+    return jsonify({"message": "Contact retrieval restarted.", "job_id": job_id})
+
+
+@app.route("/api/gmaps/sessions")
+@subscription_required
+def gmaps_sessions():
+    sessions = []
+    by_job_id: dict[str, dict] = {}
+    completion_map = _completion_by_user(session["user_id"])
+
+    persisted = _list_persisted_sessions(session["user_id"])
+    for row in persisted:
+        by_job_id[row["job_id"]] = row
+
+    for state in list_job_states():
+        if state.get("tool") != "gmaps":
+            continue
+        if state.get("user_id") != session["user_id"]:
+            continue
+        by_job_id[state.get("job_id")] = state
+
+    for value in by_job_id.values():
+        item = _state_for_frontend(value)
+        cm = completion_map.get(item.get("job_id") or "")
+        if cm:
+            item["complete_count"] = cm["complete_count"]
+            item["incomplete_count"] = cm["incomplete_count"]
+            item["completion_rate"] = cm["completion_rate"]
+        else:
+            total = int(item.get("results_count") or 0)
+            item["complete_count"] = 0
+            item["incomplete_count"] = total
+            item["completion_rate"] = 0
+        sessions.append(item)
+
+    sessions.sort(key=lambda s: s.get("updated_at") or s.get("created_at") or "", reverse=True)
+    return jsonify({"sessions": sessions})
+
+
+@app.route("/api/gmaps/sessions/<job_id>/leads")
+@subscription_required
+def gmaps_session_leads(job_id):
+    completion = request.args.get("completion", "all", type=str)
+    limit = request.args.get("limit", 500, type=int)
+
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    leads = _load_session_leads_filtered(job_id, completion=completion, limit=limit)
+    if not leads:
+        state_leads = state.get("results") if isinstance(state.get("results"), list) else []
+        if state_leads:
+            if completion == "complete":
+                leads = [
+                    lead for lead in state_leads
+                    if (
+                        (lead.get("email") and lead.get("email") != "N/A")
+                        or (lead.get("phone") and lead.get("phone") != "N/A")
+                    )
+                ]
+            elif completion == "incomplete":
+                leads = [
+                    lead for lead in state_leads
+                    if not (
+                        (lead.get("email") and lead.get("email") != "N/A")
+                        or (lead.get("phone") and lead.get("phone") != "N/A")
+                    )
+                ]
+            else:
+                leads = list(state_leads)
+            leads = leads[: int(max(1, min(limit, 2000)))]
+    logs = _load_persisted_session_logs(job_id, limit=120)
+
+    live_logs = state.get("logs") if isinstance(state.get("logs"), list) else []
+    if live_logs:
+        merged: list[dict] = []
+        seen = set()
+        for entry in logs + live_logs[-120:]:
+            msg = str(entry.get("message") or "")
+            at = str(entry.get("at") or entry.get("created_at") or "")
+            key = f"{at}|{msg}|{entry.get('progress')}"
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append({
+                "phase": entry.get("phase") or state.get("phase") or "extract",
+                "progress": entry.get("progress"),
+                "message": msg,
+                "at": at,
+            })
+        logs = merged[-150:]
+
+    cm = _completion_by_user(session["user_id"]).get(job_id, {})
+    summary = {
+        "total": int(cm.get("total") or state.get("results_count") or 0),
+        "complete_count": int(cm.get("complete_count") or 0),
+        "incomplete_count": int(cm.get("incomplete_count") or 0),
+        "completion_rate": int(cm.get("completion_rate") or 0),
+    }
+    checkpoints = _load_persisted_session_events(job_id, limit=120)
+    resume_anchor = _select_resume_anchor(job_id, state)
+    tasks = _load_persisted_session_tasks(job_id, limit=120)
+    task_health = _task_health(tasks)
+    contacts_chunk_summary = _task_chunk_summary(job_id, "contacts_main")
+    operator_controls = {
+        "can_manage_tasks": _operator_allowed_for_user(current_user()),
+    }
+
+    return jsonify({
+        "job_id": job_id,
+        "session": _state_for_frontend(state),
+        "summary": summary,
+        "completion_filter": completion,
+        "leads": leads,
+        "count": len(leads),
+        "logs": logs,
+        "checkpoints": checkpoints,
+        "resume_anchor": resume_anchor,
+        "tasks": tasks,
+        "task_health": task_health,
+        "task_chunk_summary": contacts_chunk_summary,
+        "operator_controls": operator_controls,
+    })
+
+
+@app.route("/api/gmaps/sessions/<job_id>/recover-stale", methods=["POST"])
+@subscription_required
+def gmaps_recover_stale_tasks(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    recovered = _mark_stale_tasks_retryable(job_id, stale_seconds=180)
+    updated = int(recovered.get("updated") or 0)
+    task_keys = recovered.get("task_keys") or []
+
+    if updated > 0:
+        _persist_gmaps_event(
+            state,
+            "stale_tasks_recovered",
+            f"Recovered {updated} stale task(s) as retryable",
+            payload={"updated": updated, "task_keys": task_keys},
+        )
+
+    return jsonify({
+        "message": f"Recovered {updated} stale task(s).",
+        "updated": updated,
+        "task_keys": task_keys,
+    })
+
+
+@app.route("/api/gmaps/sessions/<job_id>/recover-auto", methods=["POST"])
+@subscription_required
+def gmaps_auto_recover_session(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    payload = request.get_json(silent=True) or {}
+    apply_retry = bool(payload.get("apply_retry", True))
+    force = bool(payload.get("force", False))
+
+    if force and not _operator_allowed_for_user(current_user()):
+        return jsonify({"error": "Operator privileges required for forced auto-recovery."}), 403
+
+    recovered = _mark_stale_tasks_retryable(job_id, stale_seconds=_AUTO_SWEEP_STALE_SECONDS)
+    anchor = _select_resume_anchor(job_id, state)
+    task_key = str(anchor.get("suggested_task_key") or "").strip().lower()
+
+    _persist_gmaps_event(
+        state,
+        "auto_recovery_requested",
+        "Auto-recovery requested for session",
+        payload={
+            "apply_retry": apply_retry,
+            "force": force,
+            "recovered_stale_tasks": int(recovered.get("updated") or 0),
+            "resume_anchor": anchor.get("event_type"),
+            "suggested_task_key": task_key,
+        },
+    )
+
+    if apply_retry and task_key == "extract_main":
+        return _retry_extract_task(job_id, state, force=force, force_reason="auto_recovery")
+    if apply_retry and task_key == "contacts_main":
+        return _retry_contacts_task(job_id, state, force=force, force_reason="auto_recovery")
+
+    return jsonify(
+        {
+            "message": "Auto-recovery analysis completed.",
+            "job_id": job_id,
+            "recovered": recovered,
+            "resume_anchor": anchor,
+            "retry_started": False,
+        }
+    )
+
+
+@app.route("/api/gmaps/sessions/<job_id>/retry-task", methods=["POST"])
+@subscription_required
+def gmaps_retry_task(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    payload = request.get_json(silent=True) or {}
+    task_key = str(payload.get("task_key") or "").strip().lower()
+    force = bool(payload.get("force") is True)
+    force_reason = str(payload.get("reason") or "").strip()
+    if task_key not in {"extract_main", "contacts_main"}:
+        return jsonify({"error": "Invalid task_key. Supported: extract_main, contacts_main"}), 400
+
+    if force and not force_reason:
+        force_reason = "operator_override"
+
+    if force:
+        user = current_user()
+        if not _operator_allowed_for_user(user):
+            _persist_gmaps_event(
+                state,
+                "task_operator_denied",
+                f"Non-operator attempted force retry for {task_key}",
+                severity="warning",
+                payload={"task_key": task_key, "action": "force_retry"},
+            )
+            return jsonify({"error": "Operator privileges required for force retry."}), 403
+
+        task = _load_gmaps_task_record(job_id, task_key)
+        if task and str(task.get("status") or "").lower() == "running":
+            return jsonify({"error": "Cannot force retry while task is already running.", "task_key": task_key}), 409
+
+    if task_key == "extract_main":
+        return _retry_extract_task(job_id, state, force=force, force_reason=force_reason)
+    return _retry_contacts_task(job_id, state, force=force, force_reason=force_reason)
+
+
+@app.route("/api/gmaps/sessions/<job_id>/retry-from-anchor", methods=["POST"])
+@subscription_required
+def gmaps_retry_from_anchor(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    anchor = _select_resume_anchor(job_id, state)
+    action = str(anchor.get("suggested_action") or "").strip().lower()
+    task_key = str(anchor.get("suggested_task_key") or "").strip().lower()
+    payload = request.get_json(silent=True) or {}
+    force = bool(payload.get("force") is True)
+    force_reason = str(payload.get("reason") or "").strip() or "anchor_operator_override"
+
+    if force:
+        user = current_user()
+        if not _operator_allowed_for_user(user):
+            _persist_gmaps_event(
+                state,
+                "task_operator_denied",
+                "Non-operator attempted force retry from anchor",
+                severity="warning",
+                payload={"action": "force_retry_from_anchor"},
+            )
+            return jsonify({"error": "Operator privileges required for force retry."}), 403
+
+    if action == "completed_no_resume_needed":
+        return jsonify({
+            "message": "Session already completed. No retry needed.",
+            "job_id": job_id,
+            "suggested_action": action,
+        })
+
+    if task_key == "extract_main":
+        return _retry_extract_task(job_id, state, force=force, force_reason=force_reason)
+    if task_key == "contacts_main":
+        return _retry_contacts_task(job_id, state, force=force, force_reason=force_reason)
+
+    return jsonify({"error": "No deterministic retry action available for current resume anchor."}), 400
+
+
+@app.route("/api/gmaps/sessions/<job_id>/task-action", methods=["POST"])
+@subscription_required
+def gmaps_task_action(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    user = current_user()
+    if not _operator_allowed_for_user(user):
+        _persist_gmaps_event(
+            state,
+            "task_operator_denied",
+            "Non-operator attempted task operator action",
+            severity="warning",
+            payload={"action": "task_action"},
+        )
+        return jsonify({"error": "Operator privileges required for task actions."}), 403
+
+    payload = request.get_json(silent=True) or {}
+    task_key = str(payload.get("task_key") or "").strip().lower()
+    action = str(payload.get("action") or "").strip().lower()
+    reason = str(payload.get("reason") or "").strip() or "operator_task_action"
+    actor_email = str(user["email"] or "") if user else ""
+
+    if task_key not in {"extract_main", "contacts_main"}:
+        return jsonify({"error": "Invalid task_key. Supported: extract_main, contacts_main"}), 400
+    if action not in {"retry", "force_retry", "reset_attempts"}:
+        return jsonify({"error": "Invalid action. Supported: retry, force_retry, reset_attempts"}), 400
+
+    if action == "reset_attempts":
+        return _reset_task_attempts(job_id, state, task_key, reason=reason, actor_email=actor_email)
+
+    if task_key == "extract_main":
+        return _retry_extract_task(
+            job_id,
+            state,
+            force=(action == "force_retry"),
+            force_reason=reason,
+        )
+    return _retry_contacts_task(
+        job_id,
+        state,
+        force=(action == "force_retry"),
+        force_reason=reason,
+    )
+
+
+@app.route("/api/gmaps/sessions/<job_id>/audit-events")
+@subscription_required
+def gmaps_session_audit_events(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+
+    scope = request.args.get("scope", "operator", type=str)
+    limit = request.args.get("limit", 200, type=int)
+    safe_limit = int(max(1, min(limit, 1000)))
+
+    events = _load_scoped_audit_events(job_id, scope=scope, limit=safe_limit)
+    return jsonify({
+        "job_id": job_id,
+        "scope": scope,
+        "count": len(events),
+        "events": events,
+    })
+
+
+@app.route("/api/gmaps/sessions/<job_id>/audit-report.csv")
+@subscription_required
+def gmaps_session_audit_report_csv(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+
+    scope = request.args.get("scope", "recovery", type=str)
+    events = _load_scoped_audit_events(job_id, scope=scope, limit=2000)
+
+    output = io.StringIO()
+    fieldnames = [
+        "at",
+        "event_type",
+        "severity",
+        "phase",
+        "status",
+        "progress",
+        "message",
+        "task_key",
+        "action",
+        "reason",
+        "actor",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+
+    for event in events:
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        writer.writerow({
+            "at": event.get("at") or "",
+            "event_type": event.get("event_type") or "",
+            "severity": event.get("severity") or "",
+            "phase": event.get("phase") or "",
+            "status": event.get("status") or "",
+            "progress": event.get("progress") if event.get("progress") is not None else "",
+            "message": event.get("message") or "",
+            "task_key": payload.get("task_key") or "",
+            "action": payload.get("action") or "",
+            "reason": payload.get("reason") or payload.get("force_reason") or "",
+            "actor": payload.get("actor") or "",
+        })
+
+    output.seek(0)
+    filename = f"gmaps_audit_{job_id}_{scope}.csv".replace(" ", "_").lower()
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/gmaps/retention/status")
+@subscription_required
+def gmaps_retention_status():
+    user = current_user()
+    if not _operator_allowed_for_user(user):
+        return jsonify({"error": "Operator privileges required."}), 403
+
+    now_ts = time.time()
+    elapsed = max(0, int(now_ts - float(_last_retention_at or 0.0)))
+    next_due = max(0, int(_RETENTION_INTERVAL_SECONDS - elapsed))
+
+    return jsonify({
+        "enabled": _RETENTION_ENABLED,
+        "interval_seconds": _RETENTION_INTERVAL_SECONDS,
+        "events_days": _RETENTION_EVENTS_DAYS,
+        "logs_days": _RETENTION_LOGS_DAYS,
+        "tasks_days": _RETENTION_TASKS_DAYS,
+        "next_due_in_seconds": next_due,
+        "last_run": dict(_last_retention_summary),
+    })
+
+
+@app.route("/api/gmaps/retention/archive.csv")
+@subscription_required
+def gmaps_retention_archive_csv():
+    user = current_user()
+    if not _operator_allowed_for_user(user):
+        return jsonify({"error": "Operator privileges required."}), 403
+
+    table_name = request.args.get("table", "events", type=str).strip().lower()
+    days = request.args.get("older_than_days", 30, type=int)
+    limit = request.args.get("limit", 5000, type=int)
+
+    if table_name not in {"events", "logs", "tasks"}:
+        return jsonify({"error": "Invalid table. Supported: events, logs, tasks"}), 400
+
+    rows = _load_archive_rows_for_user(int(session["user_id"]), table_name, days, limit)
+
+    output = io.StringIO()
+    if table_name == "events":
+        fieldnames = [
+            "session_id", "user_id", "created_at", "event_type", "severity",
+            "phase", "status", "progress", "message", "payload",
+        ]
+    elif table_name == "logs":
+        fieldnames = [
+            "session_id", "user_id", "created_at", "phase", "progress", "message",
+        ]
+    else:
+        fieldnames = [
+            "session_id", "user_id", "updated_at", "task_key", "phase", "status",
+            "attempt_count", "max_attempts", "retry_backoff_seconds",
+            "retry_cooldown_until", "last_retry_reason", "last_retry_at",
+            "last_error", "payload",
+        ]
+
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    for row in rows:
+        safe_row = {k: row.get(k, "") for k in fieldnames}
+        writer.writerow(safe_row)
+
+    output.seek(0)
+    filename = f"gmaps_{table_name}_archive_gt_{max(1, int(days))}d.csv"
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@app.route("/api/gmaps/extract/restart/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_restart_extraction(job_id):
+    state = get_job_state(job_id)
+    if not state:
+        state = _load_persisted_session_state(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+
+    payload = state.get("payload") if isinstance(state.get("payload"), dict) else None
+    if not payload:
+        return jsonify({"error": "No saved payload found for this session."}), 400
+
+    payload = dict(payload)
+    payload["crawl_contacts"] = False
+
+    state.update({
+        "status": "PENDING",
+        "phase": "extract",
+        "extraction_status": "pending",
+        "contacts_status": "pending",
+        "progress": 0,
+        "results": [],
+        "results_count": 0,
+        "lead_count": 0,
+        "stop_requested": False,
+        "contact_paused": False,
+        "contact_stop_requested": False,
+        "message": "Restarting extraction...",
+        "updated_at": datetime.utcnow().isoformat(),
+        "payload": payload,
+    })
+    _append_job_log(state, "Extraction restarted", 0)
+    _save_job_state_and_persist(job_id, state)
+    _upsert_gmaps_task(
+        session_id=job_id,
+        user_id=int(state.get("user_id") or 0),
+        task_key="extract_main",
+        phase="extract",
+        status="running",
+        payload={"trigger": "extract_restart"},
+    )
+
+    accepted, reason, pool = submit_extract_job(job_id, state.get("user_id") or session["user_id"], _run_scrape_in_thread, job_id, payload)
+    if not accepted:
+        state["status"] = "PENDING"
+        state["message"] = "Extraction queue full. Retry shortly."
+        state["updated_at"] = datetime.utcnow().isoformat()
+        _append_job_log(state, f"Extraction queue rejected ({reason})", 0)
+        _save_job_state_and_persist(job_id, state)
+        _persist_gmaps_event(
+            state,
+            "extract_queue_rejected",
+            "Extraction restart rejected by worker pool due to backpressure",
+            severity="warning",
+            payload={"reason": reason, "pool": pool},
+        )
+        return jsonify({"error": "Extraction queue is full. Please retry.", "reason": reason, "pool": pool}), 429
+
+    _persist_gmaps_event(
+        state,
+        "extract_queue_accepted",
+        "Extraction restart accepted by worker pool",
+        payload={"pool": pool},
+    )
+    return jsonify({"message": "Extraction restarted.", "job_id": job_id})
+
+
+@app.route("/api/gmaps/worker-pools")
+@subscription_required
+def gmaps_worker_pools_status():
+    return jsonify({"pools": worker_pool_stats(), "postgres_enabled": pg_enabled()})
+
+
+@app.route("/api/gmaps/ops/metrics")
+@subscription_required
+def gmaps_ops_metrics():
+    window_hours = _ops_safe_window_hours(request.args.get("hours", _OPS_METRICS_DEFAULT_WINDOW_HOURS, type=int))
+    return jsonify(
+        {
+            "window_hours": window_hours,
+            "stage_metrics": _ops_stage_metrics(int(session["user_id"]), window_hours),
+            "recent_failures": _ops_recent_failures(int(session["user_id"]), window_hours, limit=20),
+        }
+    )
+
+
+@app.route("/api/gmaps/ops/alerts")
+@subscription_required
+def gmaps_ops_alerts():
+    window_hours = _ops_safe_window_hours(request.args.get("hours", _OPS_METRICS_DEFAULT_WINDOW_HOURS, type=int))
+    alerts = _ops_alerts(int(session["user_id"]), window_hours)
+    return jsonify(
+        {
+            "window_hours": window_hours,
+            "count": len(alerts),
+            "alerts": alerts,
+        }
+    )
+
+
+@app.route("/api/gmaps/ops/health")
+@subscription_required
+def gmaps_ops_health():
+    window_hours = _ops_safe_window_hours(request.args.get("hours", _OPS_METRICS_DEFAULT_WINDOW_HOURS, type=int))
+    return jsonify(_ops_health_snapshot(int(session["user_id"]), window_hours))
+
+
+@app.route("/api/gmaps/ops/dashboard")
+@subscription_required
+def gmaps_ops_dashboard():
+    window_hours = _ops_safe_window_hours(request.args.get("hours", _OPS_METRICS_DEFAULT_WINDOW_HOURS, type=int))
+    sessions = _list_persisted_sessions(int(session["user_id"]))
+    running = 0
+    completed = 0
+    failed = 0
+    for row in sessions:
+        status = str(row.get("status") or "").upper()
+        if status == "RUNNING":
+            running += 1
+        elif status == "COMPLETED":
+            completed += 1
+        elif status in {"FAILED", "PARTIAL", "STOPPED"}:
+            failed += 1
+
+    health = _ops_health_snapshot(int(session["user_id"]), window_hours)
+    return jsonify(
+        {
+            "window_hours": window_hours,
+            "summary": {
+                "sessions_total": len(sessions),
+                "sessions_running": running,
+                "sessions_completed": completed,
+                "sessions_failed_or_partial": failed,
+            },
+            "health": health,
+            "stage_metrics": _ops_stage_metrics(int(session["user_id"]), window_hours),
+            "recent_failures": _ops_recent_failures(int(session["user_id"]), window_hours, limit=25),
+        }
+    )
+
+
+@app.route("/api/gmaps/sessions/<job_id>/diagnostics")
+@subscription_required
+def gmaps_session_diagnostics(job_id):
+    state = get_job_state(job_id)
+    if state and state.get("user_id") != session["user_id"]:
+        return jsonify({"error": "Session not found."}), 404
+
+    if not state:
+        persisted = _load_persisted_session_state(job_id)
+        if not persisted or persisted.get("user_id") != session["user_id"]:
+            return jsonify({"error": "Session not found."}), 404
+        state = persisted
+
+    return jsonify(_session_diagnostics(job_id, state))
+
+
+@app.route("/api/gmaps/extract/pause/<job_id>", methods=["POST"])
+@subscription_required
+def gmaps_pause_extraction(job_id):
+    state = get_job_state(job_id)
+    if not state:
+        state = _load_persisted_session_state(job_id)
+    if not state:
+        return jsonify({"error": "Session not found."}), 404
+    set_job_stop_requested(job_id, True)
+    state["message"] = "Pause requested for extraction..."
+    state["updated_at"] = datetime.utcnow().isoformat()
+    _append_job_log(state, state["message"], state.get("progress", 0))
+    _save_job_state_and_persist(job_id, state)
+    _persist_partial_snapshot_checkpoint(state, reason="extract_pause_requested_endpoint")
+    _persist_gmaps_event(
+        state,
+        "extract_pause_requested",
+        "Extraction pause requested by user",
+        payload={"trigger": "extract_pause_endpoint"},
+    )
+    return jsonify({"message": "Pause signal sent for extraction."})
 
 
 # ============================================================
@@ -2579,6 +6445,83 @@ def api_leads_bulk_delete():
     return jsonify({"message": f"Deleted {len(ids)} leads."})
 
 
+@app.route("/api/leads/cleanup", methods=["POST"])
+@login_required
+def api_leads_cleanup():
+    """Remove duplicate and/or outlier leads for the current user."""
+    uid = session["user_id"]
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode", "both")).strip().lower()
+    if mode not in ("duplicates", "outliers", "both"):
+        return jsonify({"error": "mode must be duplicates, outliers, or both."}), 400
+
+    db = get_db()
+    duplicates_removed = 0
+    outliers_removed = 0
+
+    if mode in ("duplicates", "both"):
+        dup_ids = [
+            row["id"] for row in db.execute(
+                """
+                SELECT l1.id
+                FROM leads l1
+                JOIN leads l2
+                  ON l1.user_id = l2.user_id
+                 AND l1.id > l2.id
+                 AND lower(trim(COALESCE(l1.title, ''))) = lower(trim(COALESCE(l2.title, '')))
+                 AND lower(trim(COALESCE(l1.email, ''))) = lower(trim(COALESCE(l2.email, '')))
+                 AND lower(trim(COALESCE(l1.phone, ''))) = lower(trim(COALESCE(l2.phone, '')))
+                 AND lower(trim(COALESCE(l1.website, ''))) = lower(trim(COALESCE(l2.website, '')))
+                WHERE l1.user_id = ?
+                  AND trim(COALESCE(l1.title, '')) != ''
+                """,
+                (uid,),
+            ).fetchall()
+        ]
+        if dup_ids:
+            placeholders = ",".join("?" for _ in dup_ids)
+            db.execute(
+                f"DELETE FROM leads WHERE user_id=? AND id IN ({placeholders})",
+                [uid] + dup_ids,
+            )
+            duplicates_removed = len(dup_ids)
+
+    if mode in ("outliers", "both"):
+        outlier_ids = [
+            row["id"] for row in db.execute(
+                """
+                SELECT id FROM leads
+                WHERE user_id=?
+                  AND (
+                    trim(COALESCE(title,'')) = ''
+                    OR (
+                      length(trim(COALESCE(title,''))) < 3
+                      AND trim(COALESCE(email,'')) = ''
+                      AND trim(COALESCE(phone,'')) = ''
+                      AND trim(COALESCE(website,'')) = ''
+                    )
+                  )
+                """,
+                (uid,),
+            ).fetchall()
+        ]
+        if outlier_ids:
+            placeholders = ",".join("?" for _ in outlier_ids)
+            db.execute(
+                f"DELETE FROM leads WHERE user_id=? AND id IN ({placeholders})",
+                [uid] + outlier_ids,
+            )
+            outliers_removed = len(outlier_ids)
+
+    db.commit()
+    return jsonify({
+        "message": "Cleanup complete.",
+        "duplicates_removed": duplicates_removed,
+        "outliers_removed": outliers_removed,
+        "total_removed": duplicates_removed + outliers_removed,
+    })
+
+
 @app.route("/api/leads/stats")
 @login_required
 def api_leads_stats():
@@ -2733,6 +6676,21 @@ def set_security_headers(response):
 @limiter.exempt
 def health_check():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+
+
+@app.route("/health/ops")
+@limiter.exempt
+def ops_health_check():
+    alerts = []
+    try:
+        alerts = _ops_alerts(0, _OPS_METRICS_DEFAULT_WINDOW_HOURS)
+    except Exception:
+        alerts = []
+
+    has_critical = any(str(a.get("severity") or "").lower() == "critical" for a in alerts)
+    status = "unhealthy" if has_critical else ("degraded" if alerts else "healthy")
+    code = 503 if has_critical else 200
+    return jsonify({"status": status, "alerts_count": len(alerts), "timestamp": datetime.now().isoformat()}), code
 
 
 if __name__ == "__main__":

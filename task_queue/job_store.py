@@ -15,7 +15,7 @@ _lock = threading.Lock()
 _store: dict[str, dict] = {}
 
 # Jobs older than this are eligible for cleanup (seconds)
-JOB_TTL_SECONDS = 3600  # 1 hour
+JOB_TTL_SECONDS = 86400  # 24 hours
 
 
 def _utc_now_iso() -> str:
@@ -72,3 +72,16 @@ def is_job_stop_requested(job_id: str) -> bool:
         if state is None:
             return False
         return bool(state.get("stop_requested", False))
+
+
+def list_job_states() -> list[dict]:
+    """Return all known job states (thread-safe), newest first."""
+    with _lock:
+        _cleanup_expired()
+        values = [deepcopy(v) for v in _store.values()]
+
+    def _sort_key(state: dict):
+        return state.get("updated_at") or state.get("created_at") or ""
+
+    values.sort(key=_sort_key, reverse=True)
+    return values

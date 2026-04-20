@@ -95,8 +95,8 @@ block topbar_title %}
 
         <div class="settings-section">
           <h6>
-            <i class="bi bi-person-gear me-2" style="color: var(--accent)"></i
-            >Profile Information
+            <i class="bi bi-person-gear me-2 tool-accent-icon"></i>Profile
+            Information
           </h6>
           <form id="profileForm">
             <div class="mb-3">
@@ -134,8 +134,7 @@ block topbar_title %}
 
         <div class="settings-section">
           <h6>
-            <i class="bi bi-key-fill me-2" style="color: var(--accent)"></i
-            >Change Password
+            <i class="bi bi-key-fill me-2 tool-accent-icon"></i>Change Password
           </h6>
           <form id="passwordForm">
             <div class="mb-3">
@@ -186,20 +185,13 @@ block topbar_title %}
 
         <div class="settings-section">
           <h6>
-            <i
-              class="bi bi-info-circle-fill me-2"
-              style="color: var(--accent)"
-            ></i
-            >Account Details
+            <i class="bi bi-info-circle-fill me-2 tool-accent-icon"></i>Account
+            Details
           </h6>
           <div class="row g-3">
             <div class="col-sm-6">
               <div class="small text-muted mb-1">License Key</div>
-              <div
-                class="fw-semibold small"
-                id="settingsLicense"
-                style="font-family: monospace"
-              >
+              <div class="fw-semibold small mono-text" id="settingsLicense">
                 —
               </div>
             </div>
@@ -220,7 +212,7 @@ block topbar_title %}
             <div class="d-flex align-items-center justify-content-between">
               <div>
                 <div class="fw-semibold small">Delete Account</div>
-                <div class="text-muted" style="font-size: 0.78rem">
+                <div class="text-muted text-size-78">
                   Permanently delete your account and all associated data. This
                   action cannot be undone.
                 </div>
@@ -286,7 +278,7 @@ block topbar_title %}
             .join("")
             .toUpperCase()
             .slice(0, 2);
-          avatar.innerHTML = `<span style="font-size:1.4rem;font-weight:700;">${initials}</span>`;
+          avatar.innerHTML = `<span class="settings-avatar-initials">${initials}</span>`;
         }
       } catch (e) {
         console.error("Failed to load user:", e);

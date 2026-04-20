@@ -18,6 +18,7 @@ import re
 import time
 import math
 import hashlib
+from collections import deque
 import logging
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -72,6 +73,8 @@ EMAIL_RE = re.compile(
     r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}',
     re.I,
 )
+
+PHONE_RE = re.compile(r'(?:\+?\d[\d\s().\-]{6,}\d)')
 
 # Emails to exclude (common false positives)
 EMAIL_BLACKLIST = {
@@ -207,6 +210,54 @@ class GoogleMapsScraper:
         if self._progress_callback:
             self._progress_callback(message, percentage)
 
+    @staticmethod
+    def _is_localhost_read_timeout_error(exc: Exception) -> bool:
+        """Detect Selenium command timeouts on local WebDriver HTTP channel."""
+        text = str(exc)
+        if not text:
+            return False
+        return (
+            "HTTPConnectionPool(host='localhost'" in text
+            and "Read timed out" in text
+        ) or ("ReadTimeoutError" in text and "localhost" in text)
+
+    def _recover_driver_session(self, reason: str = "") -> bool:
+        """Best-effort driver restart after command-channel timeout."""
+        try:
+            logger.warning(f"Recovering WebDriver session ({reason})")
+            self._close_driver()
+            self._init_driver()
+            return True
+        except Exception as recovery_exc:
+            logger.error(f"WebDriver recovery failed: {recovery_exc}")
+            return False
+
+    def _navigate_with_retries(self, url: str, label: str = "page", retries: int = 2):
+        """Navigate with retry/recovery for local WebDriver read timeouts."""
+        last_exc = None
+        for attempt in range(retries + 1):
+            try:
+                self.driver.get(url)
+                return
+            except WebDriverException as exc:
+                last_exc = exc
+                if not self._is_localhost_read_timeout_error(exc):
+                    raise
+
+                logger.warning(
+                    f"WebDriver timeout while loading {label} "
+                    f"(attempt {attempt + 1}/{retries + 1}): {exc}"
+                )
+                if attempt < retries:
+                    time.sleep(min(2.0, 0.7 + (attempt * 0.5)))
+                    if attempt >= 1:
+                        self._recover_driver_session(reason=f"timeout on {label}")
+                    continue
+                break
+
+        if last_exc:
+            raise last_exc
+
     def _init_driver(self):
         """Initialize the Chrome WebDriver."""
         chrome_options = Options()
@@ -241,8 +292,8 @@ class GoogleMapsScraper:
         """Navigate to Google Maps and perform a search."""
         self._report_progress(f"Searching Google Maps for: {query}", 5)
 
-        search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}"
-        self.driver.get(search_url)
+        search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}?hl=en"
+        self._navigate_with_retries(search_url, label=f"search query '{query}'")
         time.sleep(2)
 
         # Accept cookies / consent dialog if it appears
@@ -255,6 +306,11 @@ class GoogleMapsScraper:
             time.sleep(2)
         except NoSuchElementException:
             pass
+        except WebDriverException as exc:
+            if self._is_localhost_read_timeout_error(exc):
+                logger.warning(f"Timeout checking consent dialog for query '{query}': {exc}")
+            else:
+                raise
 
         # Wait for results
         try:
@@ -264,6 +320,11 @@ class GoogleMapsScraper:
             )
         except TimeoutException:
             logger.warning("Timed out waiting for search results to load.")
+        except WebDriverException as exc:
+            if self._is_localhost_read_timeout_error(exc):
+                logger.warning(f"Timeout waiting for query results '{query}': {exc}")
+                return
+            raise
 
     def _search_maps_viewport(self, query: str, bbox: BoundingBox):
         """
@@ -280,9 +341,10 @@ class GoogleMapsScraper:
             f"https://www.google.com/maps/search/"
             f"{query.replace(' ', '+')}/"
             f"@{center_lat},{center_lng},{zoom}z"
+            f"?hl=en"
         )
 
-        self.driver.get(search_url)
+        self._navigate_with_retries(search_url, label=f"viewport search '{query}'")
         time.sleep(2.5)
 
         # Accept cookies / consent dialog
@@ -295,6 +357,11 @@ class GoogleMapsScraper:
             time.sleep(2)
         except NoSuchElementException:
             pass
+        except WebDriverException as exc:
+            if self._is_localhost_read_timeout_error(exc):
+                logger.warning(f"Timeout checking consent dialog for viewport '{query}': {exc}")
+            else:
+                raise
 
         # Wait for results
         try:
@@ -304,6 +371,11 @@ class GoogleMapsScraper:
             )
         except TimeoutException:
             logger.warning("Timed out waiting for viewport search results.")
+        except WebDriverException as exc:
+            if self._is_localhost_read_timeout_error(exc):
+                logger.warning(f"Timeout waiting for viewport results '{query}': {exc}")
+                return
+            raise
 
     def _scroll_results(self):
         """Scroll the results panel to load all listings with smart stagnation detection."""
@@ -330,42 +402,50 @@ class GoogleMapsScraper:
                 self._report_progress("Scraping stopped by user.")
                 return
 
-            # Scroll down
-            self.driver.execute_script(
-                "arguments[0].scrollTop = arguments[0].scrollHeight", results_panel
-            )
-            time.sleep(0.6)
-
-            # Check for "end of list" indicator
             try:
-                end_marker = self.driver.find_element(
-                    By.CSS_SELECTOR,
-                    'span.HlvSq'
+                # Scroll down
+                self.driver.execute_script(
+                    "arguments[0].scrollTop = arguments[0].scrollHeight", results_panel
                 )
-                if end_marker:
-                    self._report_progress("Reached end of results list.", 30)
+                time.sleep(0.6)
+
+                # Check for "end of list" indicator
+                try:
+                    end_marker = self.driver.find_element(
+                        By.CSS_SELECTOR,
+                        'span.HlvSq'
+                    )
+                    if end_marker:
+                        self._report_progress("Reached end of results list.", 30)
+                        break
+                except NoSuchElementException:
+                    pass
+
+                # Check text-based end indicator
+                try:
+                    page_source_snippet = results_panel.get_attribute("innerHTML")
+                    if "You've reached the end of the list" in page_source_snippet:
+                        self._report_progress("Reached end of results list.", 30)
+                        break
+                except Exception:
+                    pass
+
+                # Count current listing links
+                current_count = len(self.driver.find_elements(
+                    By.CSS_SELECTOR, 'a[href*="/maps/place/"]'
+                ))
+
+                # Check if scrolling produced new content
+                new_height = self.driver.execute_script(
+                    "return arguments[0].scrollHeight", results_panel
+                )
+            except WebDriverException as exc:
+                if self._is_localhost_read_timeout_error(exc):
+                    logger.warning(f"WebDriver timeout while scrolling results: {exc}")
+                    self._report_progress("Temporary browser timeout while scrolling. Continuing...", 30)
                     break
-            except NoSuchElementException:
-                pass
+                raise
 
-            # Check text-based end indicator
-            try:
-                page_source_snippet = results_panel.get_attribute("innerHTML")
-                if "You've reached the end of the list" in page_source_snippet:
-                    self._report_progress("Reached end of results list.", 30)
-                    break
-            except Exception:
-                pass
-
-            # Count current listing links
-            current_count = len(self.driver.find_elements(
-                By.CSS_SELECTOR, 'a[href*="/maps/place/"]'
-            ))
-
-            # Check if scrolling produced new content
-            new_height = self.driver.execute_script(
-                "return arguments[0].scrollHeight", results_panel
-            )
             if new_height == last_height and current_count == last_count:
                 stagnation += 1
                 if stagnation >= 3:
@@ -437,7 +517,7 @@ class GoogleMapsScraper:
         lead.longitude = lng
 
         try:
-            self.driver.get(url)
+            self._navigate_with_retries(url, label="business detail page")
             time.sleep(0.8)
 
             # Business Name
@@ -562,6 +642,8 @@ class GoogleMapsScraper:
         map_selection: dict | None = None,
         forced_geo_cells: list[BoundingBox] | None = None,
         force_primary_keyword_only: bool = False,
+        max_leads: int | None = None,
+        crawl_contacts: bool = True,
     ) -> list[dict]:
         """
         Main scraping pipeline with 3-phase architecture:
@@ -577,6 +659,8 @@ class GoogleMapsScraper:
         self._should_stop = False
         self._partial_leads = []
         seen_slugs: set[str] = set()
+        if max_leads is not None and max_leads <= 0:
+            max_leads = None
 
         try:
             self._report_progress("Initializing browser...", 2)
@@ -674,8 +758,20 @@ class GoogleMapsScraper:
                         pct,
                     )
 
-                    self._search_maps_viewport(kw, cell)
-                    self._scroll_results()
+                    try:
+                        self._search_maps_viewport(kw, cell)
+                        self._scroll_results()
+                    except WebDriverException as exc:
+                        if self._is_localhost_read_timeout_error(exc):
+                            logger.warning(
+                                f"Skipping area {ji + 1}/{total_jobs} due to timeout: {exc}"
+                            )
+                            self._report_progress(
+                                f"Area {ji + 1}/{total_jobs} timed out; continuing.",
+                                min(pct + 1, 36),
+                            )
+                            continue
+                        raise
 
                     if self._should_stop:
                         break
@@ -685,6 +781,8 @@ class GoogleMapsScraper:
                     # Deduplicate across cells using URL slug
                     new_count = 0
                     for url in cell_urls:
+                        if max_leads and len(all_listing_urls) >= max_leads:
+                            break
                         try:
                             slug = url.split("/maps/place/")[1].split("/")[0]
                         except (IndexError, AttributeError):
@@ -693,6 +791,13 @@ class GoogleMapsScraper:
                             seen_slugs.add(slug)
                             all_listing_urls.append(url)
                             new_count += 1
+
+                    if max_leads and len(all_listing_urls) >= max_leads:
+                        self._report_progress(
+                            f"Lead limit reached ({max_leads}) during listing collection.",
+                            min(pct + 1, 36),
+                        )
+                        break
 
                     self._area_stats["completed_areas"] = ji + 1
                     self._area_stats["geo_cells_completed"] = min(ji + 1, len(geo_cells))
@@ -718,14 +823,26 @@ class GoogleMapsScraper:
                         f"Searching: {query}", pct,
                     )
 
-                    self._search_maps(query)
-                    self._scroll_results()
+                    try:
+                        self._search_maps(query)
+                        self._scroll_results()
+                    except WebDriverException as exc:
+                        if self._is_localhost_read_timeout_error(exc):
+                            logger.warning(f"Skipping query '{query}' due to timeout: {exc}")
+                            self._report_progress(
+                                f"Query '{query}' timed out; continuing.",
+                                min(pct + 1, 36),
+                            )
+                            continue
+                        raise
 
                     if self._should_stop:
                         break
 
                     query_urls = self._get_listing_links()
                     for url in query_urls:
+                        if max_leads and len(all_listing_urls) >= max_leads:
+                            break
                         try:
                             slug = url.split("/maps/place/")[1].split("/")[0]
                         except (IndexError, AttributeError):
@@ -733,6 +850,13 @@ class GoogleMapsScraper:
                         if slug not in seen_slugs:
                             seen_slugs.add(slug)
                             all_listing_urls.append(url)
+
+                    if max_leads and len(all_listing_urls) >= max_leads:
+                        self._report_progress(
+                            f"Lead limit reached ({max_leads}) during listing collection.",
+                            min(pct + 1, 36),
+                        )
+                        break
 
                     self._area_stats["completed_areas"] = qi + 1
 
@@ -754,24 +878,29 @@ class GoogleMapsScraper:
                         break
 
                     pct = 37 + int((idx / total_urls) * 40)  # Phase 2 uses 37-77%
-                    if idx % 5 == 0 or idx == total_urls - 1:
-                        self._report_progress(
-                            f"Extracting business {idx + 1}/{total_urls}",
-                            min(pct, 77),
-                        )
+                    self._report_progress(
+                        f"Extracting business {idx + 1}/{total_urls}",
+                        min(pct, 77),
+                    )
 
                     lead = self._extract_business_detail(url)
                     if lead.business_name and lead.business_name != "Unknown":
                         all_leads.append(lead)
                         self._partial_leads = [asdict(l) for l in all_leads]
                         self._area_stats["leads_found"] = len(all_leads)
+                        if max_leads and len(all_leads) >= max_leads:
+                            self._report_progress(
+                                f"Lead limit reached ({max_leads}) during business extraction.",
+                                min(pct + 1, 77),
+                            )
+                            break
 
                 logger.info(f"Phase 2 complete: {len(all_leads)} businesses extracted")
 
             # ========================================
             # PHASE 3: ENRICH via parallel website crawling
             # ========================================
-            if all_leads and not self._should_stop:
+            if crawl_contacts and all_leads and not self._should_stop:
                 self._crawl_websites_for_leads(
                     all_leads,
                     label="Enriching",
@@ -803,9 +932,14 @@ class GoogleMapsScraper:
             self._partial_leads = leads
             self._area_stats["leads_found"] = len(leads)
 
-            self._report_progress(
-                f"Done! Found {len(leads)} unique leads.", 100
-            )
+            if crawl_contacts:
+                self._report_progress(
+                    f"Done! Found {len(leads)} unique leads.", 100
+                )
+            else:
+                self._report_progress(
+                    f"List extraction complete. Found {len(leads)} leads.", 100
+                )
 
         except Exception as e:
             logger.error(f"Scraping failed: {e}")
@@ -876,6 +1010,111 @@ class GoogleMapsScraper:
 
         logger.info(f"Phase 3 complete: {enriched_count}/{len(website_targets)} websites yielded contact data")
 
+    def crawl_contacts_for_leads(
+        self,
+        leads: list[dict],
+        progress_callback: Callable[[str, int], None] | None = None,
+        should_stop: Callable[[], bool] | None = None,
+        should_pause: Callable[[], bool] | None = None,
+    ) -> list[dict]:
+        """Enrich existing leads with website contacts using parallel crawling."""
+        self._should_stop = False
+
+        if progress_callback:
+            self.set_progress_callback(progress_callback)
+
+        lead_objs: list[BusinessLead] = []
+        for lead in leads:
+            lead_objs.append(BusinessLead(
+                business_name=lead.get("business_name", "") or "",
+                owner_name=lead.get("owner_name", "") or "",
+                phone=lead.get("phone", "") or "",
+                website=lead.get("website", "") or "",
+                email=lead.get("email", "") or "",
+                address=lead.get("address", "") or "",
+                rating=lead.get("rating", "") or "",
+                reviews=lead.get("reviews", "") or "",
+                category=lead.get("category", "") or "",
+                latitude=lead.get("latitude", "") or "",
+                longitude=lead.get("longitude", "") or "",
+                facebook=lead.get("facebook", "") or "",
+                instagram=lead.get("instagram", "") or "",
+                twitter=lead.get("twitter", "") or "",
+                linkedin=lead.get("linkedin", "") or "",
+                youtube=lead.get("youtube", "") or "",
+                tiktok=lead.get("tiktok", "") or "",
+                pinterest=lead.get("pinterest", "") or "",
+            ))
+
+            self._partial_leads = [asdict(l) for l in lead_objs]
+
+        website_targets = [lead for lead in lead_objs if lead.website and lead.website != "N/A"]
+        total_targets = len(website_targets)
+        if total_targets == 0:
+            self._report_progress("Contact retrieval skipped: no website URLs available.", 100)
+            return [asdict(l) for l in lead_objs]
+
+        self._area_stats["websites_total"] = total_targets
+        self._area_stats["websites_scanned"] = 0
+
+        workers = min(self._website_workers, total_targets)
+        processed = 0
+        enriched_count = 0
+
+        self._report_progress(
+            f"Contact retrieval started: scanning {total_targets} websites...",
+            2,
+        )
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+            futures = {
+                executor.submit(self._scrape_website, lead): lead
+                for lead in website_targets
+            }
+
+            for future in as_completed(futures):
+                if should_stop and should_stop():
+                    self._should_stop = True
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    self._report_progress(
+                        f"Contact retrieval stopped at {processed}/{total_targets} websites.",
+                        min(99, 2 + int((processed / max(1, total_targets)) * 95)),
+                    )
+                    break
+
+                while should_pause and should_pause():
+                    time.sleep(0.25)
+
+                processed += 1
+                lead = futures[future]
+
+                try:
+                    future.result(timeout=self._website_timeout_seconds + 2)
+                except Exception as e:
+                    logger.debug(f"Website crawl skipped for {lead.business_name} ({lead.website}): {e}")
+
+                if lead.email and lead.email != "N/A":
+                    enriched_count += 1
+
+                self._area_stats["websites_scanned"] = processed
+                self._partial_leads = [asdict(l) for l in lead_objs]
+
+                pct = 2 + int((processed / total_targets) * 95)
+                self._report_progress(
+                    f"Contact retrieval: {processed}/{total_targets} websites (emails found: {enriched_count})",
+                    min(99, pct),
+                )
+
+        if not self._should_stop:
+            self._report_progress(
+                f"Contact retrieval complete: scanned {processed}/{total_targets} websites.",
+                100,
+            )
+
+        self._partial_leads = [asdict(l) for l in lead_objs]
+
+        return [asdict(l) for l in lead_objs]
+
     def _scrape_website(self, lead: BusinessLead):
         """Visit a business website to extract emails and social profiles."""
         url = lead.website
@@ -885,20 +1124,34 @@ class GoogleMapsScraper:
         if not url.startswith("http"):
             url = "https://" + url
 
-        # Pages to check: homepage first, then contact pages
-        pages_to_check = [url]
-        for path in ["/contact", "/contact-us", "/about", "/about-us"]:
-            pages_to_check.append(urljoin(url, path))
+        # Pages to check: homepage + high-signal contact/about slugs
+        candidate_paths = [
+            "", "/contact", "/contact-us", "/contactus", "/get-in-touch",
+            "/reach-us", "/support", "/help", "/about", "/about-us",
+            "/who-we-are", "/our-team", "/team", "/company", "/about/company",
+            "/about/team", "/connect",
+        ]
+
+        pages_to_check: deque[str] = deque()
+        seen_pages: set[str] = set()
+        for path in candidate_paths:
+            page = url if not path else urljoin(url, path)
+            if page not in seen_pages:
+                pages_to_check.append(page)
+                seen_pages.add(page)
 
         all_emails = set()
+        all_phones = set()
         found_socials = {k: "" for k in SOCIAL_PATTERNS}
         deadline = time.monotonic() + self._website_timeout_seconds
         session = self._new_http_session()
         homepage_reachable = False
+        pages_checked = 0
 
-        for page_url in pages_to_check[: self._max_pages_per_website]:
+        while pages_to_check and pages_checked < self._max_pages_per_website:
             if self._should_stop:
                 break
+            page_url = pages_to_check.popleft()
             try:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -911,12 +1164,19 @@ class GoogleMapsScraper:
                     timeout=(2.0, read_timeout),
                     allow_redirects=True,
                 )
-                if resp.status_code != 200:
+                if resp.status_code == 404 or resp.status_code >= 400:
                     continue
 
+                pages_checked += 1
+
                 homepage_reachable = True
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                if "text/html" not in content_type and "application/xhtml+xml" not in content_type:
+                    continue
+
                 text = resp.text
                 soup = BeautifulSoup(text, "lxml")
+                text_content = soup.get_text(" ", strip=True)
 
                 # ---- Extract Emails ----
                 for a in soup.find_all("a", href=True):
@@ -929,6 +1189,14 @@ class GoogleMapsScraper:
                 for match in EMAIL_RE.findall(text):
                     if self._is_valid_email(match):
                         all_emails.add(match.lower())
+
+                for match in EMAIL_RE.findall(text_content):
+                    if self._is_valid_email(match):
+                        all_emails.add(match.lower())
+
+                # ---- Extract Phones ----
+                for phone in self._extract_phones(text_content):
+                    all_phones.add(phone)
 
                 # ---- Extract Social Links ----
                 for a in soup.find_all("a", href=True):
@@ -945,7 +1213,28 @@ class GoogleMapsScraper:
                         if m:
                             found_socials[platform] = m.group(0)
 
-                if all_emails and all(found_socials.values()):
+                # ---- Discover internal high-signal links ----
+                parsed_base = urlparse(url)
+                for a in soup.find_all("a", href=True):
+                    href = (a.get("href") or "").strip()
+                    if not href:
+                        continue
+
+                    abs_url = urljoin(page_url, href)
+                    parsed_link = urlparse(abs_url)
+                    if parsed_link.netloc and parsed_link.netloc != parsed_base.netloc:
+                        continue
+
+                    path_l = (parsed_link.path or "").lower()
+                    if any(token in path_l for token in [
+                        "contact", "about", "team", "company", "support",
+                        "connect", "help", "who-we-are", "our-story",
+                    ]):
+                        if abs_url not in seen_pages:
+                            seen_pages.add(abs_url)
+                            pages_to_check.append(abs_url)
+
+                if all_emails and all_phones and all(found_socials.values()):
                     break
 
             except (requests.ConnectionError, requests.Timeout) as e:
@@ -968,12 +1257,36 @@ class GoogleMapsScraper:
         # Assign to lead
         if all_emails:
             lead.email = "; ".join(sorted(all_emails))
+
+        if all_phones:
+            normalized_existing = self._extract_phones(lead.phone or "")
+            merged_phones = sorted(set(normalized_existing).union(all_phones))
+            if merged_phones:
+                lead.phone = "; ".join(merged_phones)
+
         for platform, url_val in found_socials.items():
             if url_val:
                 setattr(lead, platform, url_val)
 
-        if all_emails or any(found_socials.values()):
-            logger.debug(f"Enriched {lead.business_name}: emails={len(all_emails)}, socials={sum(1 for v in found_socials.values() if v)} (checked {pages_checked} pages)")
+        if all_emails or all_phones or any(found_socials.values()):
+            logger.debug(
+                f"Enriched {lead.business_name}: emails={len(all_emails)}, phones={len(all_phones)}, "
+                f"socials={sum(1 for v in found_socials.values() if v)} (checked {pages_checked} pages)"
+            )
+
+    @staticmethod
+    def _extract_phones(text: str) -> set[str]:
+        phones: set[str] = set()
+        if not text:
+            return phones
+
+        for raw in PHONE_RE.findall(text):
+            digits = re.sub(r"\D", "", raw)
+            if 7 <= len(digits) <= 15:
+                normalized = re.sub(r"\s+", " ", raw.strip())
+                phones.add(normalized)
+
+        return phones
 
     @staticmethod
     def _is_valid_email(email: str) -> bool:
@@ -1020,6 +1333,9 @@ def clean_leads(leads: list[dict]) -> list[dict]:
             website = "https://" + website
 
         cleaned.append({
+            "lead_uid": hashlib.sha1(
+                f"{name.lower()}|{lead.get('latitude', '')}|{lead.get('longitude', '')}|{lead.get('address', '')}".encode("utf-8")
+            ).hexdigest()[:16],
             "business_name": name,
             "owner_name": lead.get("owner_name", "N/A") or "N/A",
             "phone": phone or "N/A",

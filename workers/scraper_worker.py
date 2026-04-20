@@ -4,7 +4,6 @@ from typing import Callable
 
 from geo.quadtree import BoundingBox
 from scraper import GoogleMapsScraper, clean_leads
-from utils.deduplicator import deduplicate
 
 
 JobInput = dict
@@ -33,6 +32,8 @@ def run_scraper_job(
     """
     job_id = str(payload.get("job_id", ""))
     keyword = str(payload.get("keyword", "")).strip()
+    max_leads = payload.get("max_leads")
+    crawl_contacts = bool(payload.get("crawl_contacts", False))
     geo_cell = payload.get("geo_cell") if isinstance(payload.get("geo_cell"), dict) else {}
     map_selection = payload.get("map_selection") if isinstance(payload.get("map_selection"), dict) else None
 
@@ -57,6 +58,12 @@ def run_scraper_job(
     place = str(payload.get("place", "")).strip()
     if not place and lat is not None and lng is not None:
         place = f"{lat}, {lng}"
+
+    if max_leads is not None:
+        try:
+            max_leads = int(max_leads)
+        except (TypeError, ValueError):
+            max_leads = None
 
     scraper = GoogleMapsScraper(headless=True)
 
@@ -88,6 +95,8 @@ def run_scraper_job(
             map_selection=map_selection,
             forced_geo_cells=forced_geo_cells,
             force_primary_keyword_only=bool(forced_geo_cells),
+            max_leads=max_leads,
+            crawl_contacts=crawl_contacts,
         )
 
         # Light cleanup: normalize fields, but do NOT aggressively deduplicate
