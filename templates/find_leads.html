@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% block title %}Find Leads — LeadGen{% endblock %}
+{% block content %}
+<div class="page-header mb-4">
+  <h1 class="page-title"><i class="bi bi-search-heart me-2" style="color:var(--accent)"></i>Find Leads</h1>
+  <p class="page-subtitle text-muted">Choose a source to start discovering leads. Results flow directly into Intelligence for scoring.</p>
+</div>
+
+<div class="find-leads-grid">
+  <!-- Google Maps -->
+  <a href="/tools/google-maps" class="find-card">
+    <div class="find-card-icon" style="background:linear-gradient(135deg,#4285F4,#34A853)">
+      <i class="bi bi-geo-alt-fill"></i>
+    </div>
+    <div class="find-card-content">
+      <h3>Google Maps</h3>
+      <p>Find local businesses by keyword + location. Captures name, phone, website, rating, reviews.</p>
+      <div class="find-card-tags">
+        <span class="badge-tag">Local Business</span>
+        <span class="badge-tag">Phone</span>
+        <span class="badge-tag">Reviews</span>
+      </div>
+    </div>
+    <div class="find-card-cta"><i class="bi bi-arrow-right-circle-fill"></i></div>
+  </a>
+
+  <!-- LinkedIn -->
+  <a href="/tools/linkedin" class="find-card">
+    <div class="find-card-icon" style="background:linear-gradient(135deg,#0077B5,#005582)">
+      <i class="bi bi-linkedin"></i>
+    </div>
+    <div class="find-card-content">
+      <h3>LinkedIn</h3>
+      <p>Scrape B2B leads from LinkedIn search results via SERP. Gets company name, title, and email.</p>
+      <div class="find-card-tags">
+        <span class="badge-tag">B2B</span>
+        <span class="badge-tag">Titles</span>
+        <span class="badge-tag">Email</span>
+      </div>
+    </div>
+    <div class="find-card-cta"><i class="bi bi-arrow-right-circle-fill"></i></div>
+  </a>
+
+  <!-- Instagram -->
+  <a href="/tools/instagram" class="find-card">
+    <div class="find-card-icon" style="background:linear-gradient(135deg,#E1306C,#833AB4)">
+      <i class="bi bi-instagram"></i>
+    </div>
+    <div class="find-card-content">
+      <h3>Instagram</h3>
+      <p>Find active brands and creators by hashtag or profile. Captures follower count and engagement rate.</p>
+      <div class="find-card-tags">
+        <span class="badge-tag">Social</span>
+        <span class="badge-tag">Engagement</span>
+        <span class="badge-tag">Creators</span>
+      </div>
+    </div>
+    <div class="find-card-cta"><i class="bi bi-arrow-right-circle-fill"></i></div>
+  </a>
+
+  <!-- Web Crawler -->
+  <a href="/tools/web-crawler" class="find-card">
+    <div class="find-card-icon" style="background:linear-gradient(135deg,#7C3AED,#4F46E5)">
+      <i class="bi bi-globe2"></i>
+    </div>
+    <div class="find-card-content">
+      <h3>Web Crawler</h3>
+      <p>Deep-crawl websites to extract emails, phone numbers, and contact info from any domain.</p>
+      <div class="find-card-tags">
+        <span class="badge-tag">Any Site</span>
+        <span class="badge-tag">Email Extract</span>
+        <span class="badge-tag">Deep Crawl</span>
+      </div>
+    </div>
+    <div class="find-card-cta"><i class="bi bi-arrow-right-circle-fill"></i></div>
+  </a>
+</div>
+
+<!-- Quick Stats Banner -->
+<div class="find-stats-banner mt-4" id="findStatsBanner">
+  <div class="find-stat"><span class="find-stat-val" id="statTotalLeads">—</span><span class="find-stat-label">Total Leads</span></div>
+  <div class="find-stat"><span class="find-stat-val" id="statHotLeads">—</span><span class="find-stat-label">Hot Leads</span></div>
+  <div class="find-stat"><span class="find-stat-val" id="statPipelineItems">—</span><span class="find-stat-label">In Pipeline</span></div>
+  <div class="find-stat"><span class="find-stat-val" id="statActiveCampaigns">—</span><span class="find-stat-label">Active Campaigns</span></div>
+  <a href="/intelligence" class="btn btn-sm btn-outline-light ms-auto">View Intelligence <i class="bi bi-arrow-right"></i></a>
+</div>
+
+<style>
+.find-leads-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1.25rem;
+}
+.find-card {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  background: var(--card-bg, #1e1e2e);
+  border: 1px solid var(--border-color, rgba(255,255,255,.08));
+  border-radius: 16px;
+  padding: 1.5rem;
+  text-decoration: none;
+  color: inherit;
+  transition: transform .2s, box-shadow .2s, border-color .2s;
+  cursor: pointer;
+}
+.find-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 12px 32px rgba(0,0,0,.35);
+  border-color: var(--accent, #6366f1);
+  color: inherit;
+  text-decoration: none;
+}
+.find-card-icon {
+  width: 56px; height: 56px; min-width: 56px;
+  border-radius: 14px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.5rem; color: #fff;
+}
+.find-card-content { flex: 1 }
+.find-card-content h3 { font-size: 1.05rem; font-weight: 700; margin: 0 0 .35rem }
+.find-card-content p  { font-size: .82rem; color: var(--text-muted,#aaa); margin: 0 0 .6rem; line-height: 1.45 }
+.find-card-tags { display: flex; gap: .4rem; flex-wrap: wrap }
+.badge-tag {
+  font-size: .7rem; padding: 2px 8px;
+  background: rgba(99,102,241,.15); color: var(--accent,#6366f1);
+  border-radius: 999px; border: 1px solid rgba(99,102,241,.3);
+}
+.find-card-cta { font-size: 1.4rem; color: var(--accent,#6366f1); opacity: .5; transition: opacity .2s }
+.find-card:hover .find-card-cta { opacity: 1 }
+
+.find-stats-banner {
+  background: var(--card-bg,#1e1e2e);
+  border: 1px solid var(--border-color,rgba(255,255,255,.08));
+  border-radius: 16px;
+  padding: 1.25rem 1.75rem;
+  display: flex; align-items: center; gap: 2.5rem;
+}
+.find-stat { display: flex; flex-direction: column; align-items: center }
+.find-stat-val  { font-size: 1.5rem; font-weight: 800; color: var(--accent,#6366f1); line-height: 1 }
+.find-stat-label { font-size: .72rem; color: var(--text-muted,#aaa); margin-top: .25rem; text-transform: uppercase; letter-spacing: .05em }
+</style>
+
+<script>
+// Populate quick stats from dashboard API
+fetch('/api/dashboard/metrics?days=90')
+  .then(r => r.json())
+  .then(d => {
+    const s = d.summary || {};
+    document.getElementById('statTotalLeads').textContent = (s.total_leads ?? '—').toLocaleString?.() ?? s.total_leads;
+    document.getElementById('statHotLeads').textContent   = (s.hot_leads ?? '—').toLocaleString?.() ?? s.hot_leads;
+    document.getElementById('statPipelineItems').textContent = (s.pipeline_items ?? '—').toLocaleString?.() ?? s.pipeline_items;
+    document.getElementById('statActiveCampaigns').textContent = (s.active_campaigns ?? '—').toLocaleString?.() ?? s.active_campaigns;
+  })
+  .catch(() => {});
+</script>
+{% endblock %}

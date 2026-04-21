@@ -1,0 +1,345 @@
+{% extends "base.html" %}
+{% block title %}Lead Intelligence — LeadGen{% endblock %}
+
+{% block topbar_title %}
+  <i class="bi bi-stars me-2" style="color: var(--accent)"></i>Lead Intelligence
+{% endblock %}
+
+{% block extra_css %}
+<style>
+/* ── Page Layout ────────────────────────────────────────────────────────── */
+.intel-layout {
+  display: grid;
+  grid-template-columns: 1fr 360px;
+  gap: 20px;
+  height: calc(100vh - 120px);
+  overflow: hidden;
+}
+@media (max-width: 1100px) {
+  .intel-layout { grid-template-columns: 1fr; height: auto; overflow: visible; }
+}
+
+/* ── Stats Bar ──────────────────────────────────────────────────────────── */
+.intel-stats-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.intel-stat-card {
+  background: var(--bg-card, rgba(255,255,255,0.05));
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: 12px;
+  padding: 10px 18px;
+  min-width: 110px;
+  text-align: center;
+  transition: border-color 0.2s;
+}
+.intel-stat-card:hover { border-color: var(--accent, #6366f1); }
+.intel-stat-value { font-size: 1.5rem; font-weight: 800; color: var(--text-primary, #f3f4f6); }
+.intel-stat-label { font-size: 0.71rem; color: var(--text-secondary, #9ca3af); text-transform: uppercase; letter-spacing: 0.05em; }
+
+/* ── Filter Bar ─────────────────────────────────────────────────────────── */
+.intel-filter-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.intel-filter-btn {
+  padding: 5px 14px;
+  border-radius: 20px;
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  background: transparent;
+  color: var(--text-secondary, #9ca3af);
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s;
+}
+.intel-filter-btn.active,
+.intel-filter-btn:hover { background: var(--accent, #6366f1); color: #fff; border-color: var(--accent); }
+.intel-filter-btn.hot    { --accent: #ef4444; }
+.intel-filter-btn.warm   { --accent: #f59e0b; }
+.intel-filter-btn.cold   { --accent: #6366f1; }
+.intel-search {
+  flex: 1;
+  min-width: 160px;
+  background: var(--bg-card, rgba(255,255,255,0.05));
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--text-primary, #f3f4f6);
+  font-size: 0.82rem;
+}
+.intel-search:focus { outline: none; border-color: var(--accent, #6366f1); }
+
+/* ── Lead List Panel ────────────────────────────────────────────────────── */
+.intel-lead-list {
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: 16px;
+  background: var(--bg-card, rgba(255,255,255,0.03));
+}
+.intel-lead-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border, rgba(255,255,255,0.06));
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.intel-lead-item:hover  { background: rgba(255,255,255,0.04); }
+.intel-lead-item.active { background: rgba(99,102,241,0.12); border-left: 3px solid var(--accent,#6366f1); }
+.intel-lead-item:last-child { border-bottom: none; }
+
+/* Score ring */
+.score-ring-wrap {
+  position: relative;
+  width: 46px;
+  height: 46px;
+  flex-shrink: 0;
+}
+.score-ring-svg { transform: rotate(-90deg); width: 46px; height: 46px; }
+.score-ring-bg   { fill: none; stroke: rgba(255,255,255,0.08); stroke-width: 3; }
+.score-ring-fill { fill: none; stroke-width: 3; stroke-linecap: round;
+                   transition: stroke-dasharray 0.6s ease; }
+.score-ring-val {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.75rem; font-weight: 800;
+  color: var(--text-primary, #f3f4f6);
+}
+
+/* Tier badge */
+.tier-badge {
+  display: inline-block;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  margin-left: 6px;
+}
+.tier-hot  { background: hsl(0,70%,20%);   color: hsl(0,90%,72%); }
+.tier-warm { background: hsl(38,70%,18%);  color: hsl(38,90%,72%); }
+.tier-cold { background: hsl(240,30%,20%); color: hsl(240,60%,75%); }
+.tier-dead { background: hsl(0,0%,14%);    color: hsl(0,0%,50%); }
+
+/* Signal pills */
+.signal-pills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 5px; }
+.signal-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.07);
+  color: var(--text-secondary, #9ca3af);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* ── Insight Panel ──────────────────────────────────────────────────────── */
+.intel-insight-panel {
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(255,255,255,0.1));
+  border-radius: 16px;
+  background: var(--bg-card, rgba(255,255,255,0.03));
+  padding: 20px;
+}
+.insight-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  min-height: 300px;
+  color: var(--text-secondary, #9ca3af);
+  text-align: center;
+}
+.insight-section { margin-bottom: 18px; }
+.insight-section-title {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-secondary, #9ca3af);
+  margin-bottom: 8px;
+}
+.insight-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--text-primary, #f3f4f6);
+  margin-bottom: 5px;
+  line-height: 1.45;
+}
+.insight-item i { flex-shrink: 0; margin-top: 2px; }
+
+/* Sub-score bars */
+.subscore-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.75rem;
+}
+.subscore-label { width: 92px; color: var(--text-secondary, #9ca3af); flex-shrink: 0; }
+.subscore-track {
+  flex: 1;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.07);
+  overflow: hidden;
+}
+.subscore-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.subscore-val { width: 28px; text-align: right; color: var(--text-secondary, #9ca3af); }
+
+/* Next action card */
+.next-action-card {
+  background: linear-gradient(135deg, hsl(240,40%,18%), hsl(270,30%,18%));
+  border: 1px solid hsl(240,30%,30%);
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 0.8rem;
+  color: hsl(240,80%,85%);
+  margin-top: 10px;
+}
+.next-action-card .action-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: hsl(240,60%,65%);
+  margin-bottom: 4px;
+}
+
+/* Skeleton loader */
+.intel-skeleton {
+  display: flex;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+.skel-circle { width: 46px; height: 46px; border-radius: 50%; background: rgba(255,255,255,0.07); flex-shrink: 0; animation: skel-pulse 1.5s ease-in-out infinite; }
+.skel-lines  { flex: 1; }
+.skel-line   { height: 10px; border-radius: 5px; background: rgba(255,255,255,0.07); margin-bottom: 7px; animation: skel-pulse 1.5s ease-in-out infinite; }
+.skel-line.short { width: 60%; }
+.skel-line.xshort { width: 35%; }
+@keyframes skel-pulse { 0%,100%{opacity:.5} 50%{opacity:1} }
+
+/* Contact chips */
+.contact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.1);
+  margin: 3px 3px 3px 0;
+  cursor: pointer;
+  text-decoration: none;
+  color: var(--text-primary, #f3f4f6);
+  transition: background 0.15s;
+}
+.contact-chip:hover { background: rgba(255,255,255,0.12); }
+
+/* Loading overlay */
+.intel-loading { text-align: center; padding: 40px; color: var(--text-secondary, #9ca3af); }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Stats Bar -->
+<div class="intel-stats-bar" id="intelStatsBar">
+  <div class="intel-stat-card">
+    <div class="intel-stat-value" id="statTotal">—</div>
+    <div class="intel-stat-label">Total Leads</div>
+  </div>
+  <div class="intel-stat-card">
+    <div class="intel-stat-value" id="statAvgScore" style="color:#f59e0b">—</div>
+    <div class="intel-stat-label">Avg Score</div>
+  </div>
+  <div class="intel-stat-card">
+    <div class="intel-stat-value" id="statHot" style="color:#ef4444">—</div>
+    <div class="intel-stat-label">🔥 Hot</div>
+  </div>
+  <div class="intel-stat-card">
+    <div class="intel-stat-value" id="statWarm" style="color:#f59e0b">—</div>
+    <div class="intel-stat-label">Warm</div>
+  </div>
+  <div class="intel-stat-card">
+    <div class="intel-stat-value" id="statCold" style="color:#6366f1">—</div>
+    <div class="intel-stat-label">Cold</div>
+  </div>
+  <div class="ms-auto">
+    <button class="btn btn-sm btn-outline-secondary" id="btnRescoreAll" title="Re-run scoring on all leads" style="font-size:0.75rem">
+      <i class="bi bi-arrow-clockwise me-1"></i>Rescore All
+    </button>
+  </div>
+</div>
+
+<!-- Filter Bar -->
+<div class="intel-filter-bar">
+  <button class="intel-filter-btn active" data-tier="" id="filterAll">All</button>
+  <button class="intel-filter-btn hot"  data-tier="hot"  id="filterHot">🔥 Hot</button>
+  <button class="intel-filter-btn warm" data-tier="warm" id="filterWarm">Warm</button>
+  <button class="intel-filter-btn cold" data-tier="cold" id="filterCold">Cold</button>
+  <select id="sortSelect" class="intel-search" style="flex:0;width:130px">
+    <option value="score">Sort: Score</option>
+    <option value="name">Sort: Name</option>
+    <option value="recency">Sort: Recent</option>
+  </select>
+  <input type="text" id="intelSearch" class="intel-search" placeholder="🔍 Search leads..." autocomplete="off">
+</div>
+
+<!-- Main Layout -->
+<div class="intel-layout">
+  <!-- Lead List -->
+  <div class="intel-lead-list" id="intelLeadList">
+    <!-- Skeletons while loading -->
+    {% for _ in range(6) %}
+    <div class="intel-skeleton">
+      <div class="skel-circle"></div>
+      <div class="skel-lines">
+        <div class="skel-line"></div>
+        <div class="skel-line short"></div>
+        <div class="skel-line xshort"></div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Insight Panel -->
+  <div class="intel-insight-panel" id="intelInsightPanel">
+    <div class="insight-empty" id="insightEmpty">
+      <i class="bi bi-stars" style="font-size:3rem;opacity:0.3;margin-bottom:12px"></i>
+      <div style="font-size:0.9rem;font-weight:600;margin-bottom:6px">Select a lead</div>
+      <div style="font-size:0.78rem">Click any lead to see its score breakdown,<br>signals, and outreach insights.</div>
+    </div>
+    <div id="insightContent" style="display:none"></div>
+  </div>
+</div>
+
+<!-- Load more -->
+<div class="text-center py-3" id="loadMoreWrap" style="display:none">
+  <button class="btn btn-outline-secondary btn-sm" id="btnLoadMore">Load more</button>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/intelligence.js') }}"></script>
+{% endblock %}

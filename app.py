@@ -51,6 +51,47 @@ from task_queue.postgres_mirror import (
 )
 from workers.scraper_worker import run_scraper_job
 
+# Phase 2: Queue system imports
+from config import QUEUE_ENABLED, TOOL_CONFIG, MAX_ACTIVE_JOBS_PER_USER
+from jobs.store import (
+    ensure_jobs_table as _ensure_jobs_table,
+    create_job as _create_queue_job,
+    get_job as _get_queue_job,
+    update_job as _update_queue_job,
+    count_active_jobs as _count_active_queue_jobs,
+)
+from jobs.queue import (
+    enqueue_job as _enqueue_redis_job,
+    set_stop_signal as _set_redis_stop,
+    queue_health as _queue_health,
+)
+from jobs.sweeper import start_sweeper_thread as _start_sweeper
+
+# Phase 3: Agent routing
+from agents.service import (
+    assign_execution_mode as _assign_execution_mode,
+    get_active_agent_for_user as _get_active_agent,
+)
+from agents.routes import agents_bp as _agents_bp
+
+# Phase 4: Intelligence Layer
+from intelligence.routes import intelligence_bp as _intelligence_bp
+
+# Phase 5: CRM / Outreach / Workflows
+from crm.routes       import crm_bp       as _crm_bp
+from outreach.routes  import outreach_bp  as _outreach_bp
+from workflows.routes import workflows_bp as _workflows_bp
+
+# Phase A: SSE real-time streaming
+from api.sse import sse_bp as _sse_bp, publish as _sse_publish
+
+# Phase B: Extracted blueprint modules
+from api.linkedin import linkedin_bp as _linkedin_bp
+from api.instagram import instagram_bp as _instagram_bp
+from api.webcrawler import webcrawler_bp as _webcrawler_bp
+# Note: api.pages and api.health are available but not registered here
+# because the equivalent routes still exist in this file during migration.
+
 # Instagram search-type aliases (old → new)
 _IG_TYPE_MAP = {"emails": "profiles", "profiles": "profiles", "businesses": "businesses"}
 
@@ -229,6 +270,53 @@ def _state_for_frontend(job_state: dict) -> dict:
     state.setdefault("phase", "extract")
     state.setdefault("contacts_status", "pending")
     state.setdefault("logs", [])
+
+    # --- Phase 1: Computed real-time metrics ---
+    created_at = state.get("created_at")
+    now = datetime.utcnow()
+    elapsed_seconds = 0
+    if created_at:
+        try:
+            start = datetime.fromisoformat(str(created_at))
+            elapsed_seconds = max(0, int((now - start).total_seconds()))
+        except (ValueError, TypeError):
+            pass
+    state["elapsed_seconds"] = elapsed_seconds
+
+    # Speed: leads per minute
+    results_count = state.get("results_count", 0) or 0
+    if elapsed_seconds > 10 and results_count > 0:
+        speed = round((results_count / elapsed_seconds) * 60, 1)
+    else:
+        speed = 0
+    state["speed"] = speed
+
+    # ETA: estimated seconds remaining
+    progress = state.get("progress", 0) or 0
+    if progress > 5 and progress < 100 and elapsed_seconds > 10:
+        eta_seconds = int((elapsed_seconds / progress) * (100 - progress))
+    else:
+        eta_seconds = None
+    state["eta_seconds"] = eta_seconds
+
+    # Phase detail text
+    phase = state.get("phase", "extract")
+    area_stats = state.get("area_stats", {})
+    if phase == "extract":
+        total = area_stats.get("geo_cells_total", 0) or 0
+        done = area_stats.get("geo_cells_completed", 0) or 0
+        if total > 0:
+            phase_detail = f"Scanning area {done}/{total}"
+        else:
+            phase_detail = "Initializing extraction..."
+    elif phase == "contacts":
+        ws_total = area_stats.get("websites_total", 0) or 0
+        ws_done = area_stats.get("websites_scanned", 0) or 0
+        phase_detail = f"Enriching contacts ({ws_done}/{ws_total})"
+    else:
+        phase_detail = state.get("message", "Working...")
+    state["phase_detail"] = phase_detail
+
     return state
 
 
@@ -2413,6 +2501,21 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
         _append_job_log(current, message, percent)
         _save_job_state_and_persist(job_id, current)
 
+        # SSE: push geocell/progress events
+        _sse_publish(job_id, "geocell_progress", {
+            "percent": max(0, min(100, percent)),
+            "message": message,
+            "results_count": results_count,
+            "area_stats": area_stats,
+        })
+
+    def on_lead_found(lead_dict: dict, index: int):
+        """SSE hook: push each lead to the browser the instant it's extracted."""
+        _sse_publish(job_id, "lead_found", {
+            "lead": lead_dict,
+            "index": index,
+        })
+
     def should_stop() -> bool:
         return is_job_stop_requested(job_id)
 
@@ -2443,10 +2546,18 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
             payload={"job_id": job_id},
         )
 
+        # SSE: notify job started
+        _sse_publish(job_id, "job_started", {
+            "job_id": job_id,
+            "keyword": state.get("keyword"),
+            "place": state.get("place"),
+        })
+
         result = run_scraper_job(
             payload=payload,
             progress_callback=progress_callback,
             should_stop=should_stop,
+            on_lead_found=on_lead_found,
         )
 
         final_status = "PARTIAL" if result.get("status") == "PARTIAL" else "COMPLETED"
@@ -2497,6 +2608,14 @@ def _run_scrape_in_thread(job_id: str, payload: dict):
             final_state["message"],
             payload={"results_count": len(final_leads)},
         )
+
+        # SSE: notify extraction complete
+        _sse_publish(job_id, "job_completed", {
+            "status": final_status,
+            "total_leads": len(final_leads),
+            "phase": "extract",
+            "message": final_state["message"],
+        })
 
     except Exception as exc:
         log.error(f"Scrape job {job_id} failed: {exc}")
@@ -2695,12 +2814,33 @@ def _run_contact_retrieval_thread(job_id: str):
                 _append_job_log(current, current["message"], overall)
                 _save_job_state_and_persist(job_id, current)
 
+            def _on_contact_found(lead_index: int, enriched_lead: dict):
+                """SSE hook: push per-lead contact enrichment to the browser."""
+                _sse_publish(job_id, "contact_found", {
+                    "lead_index": lead_index,
+                    "business_name": enriched_lead.get("business_name", ""),
+                    "email": enriched_lead.get("email", "N/A"),
+                    "phone": enriched_lead.get("phone", "N/A"),
+                    "socials": {
+                        k: enriched_lead.get(k, "N/A")
+                        for k in ("facebook", "instagram", "twitter", "linkedin", "youtube", "tiktok", "pinterest")
+                    },
+                })
+
+            # SSE: notify crawl phase started for this chunk
+            _sse_publish(job_id, "crawl_started", {
+                "chunk_index": chunk_index,
+                "total_chunks": total_chunks,
+                "lead_count": len(chunk_leads),
+            })
+
             try:
                 enriched_chunk = scraper.crawl_contacts_for_leads(
                     leads=chunk_leads,
                     progress_callback=_progress,
                     should_stop=_should_stop,
                     should_pause=_should_pause,
+                    on_contact_found=_on_contact_found,
                 )
                 cleaned_chunk = clean_leads(enriched_chunk)
                 for item in cleaned_chunk:
@@ -2857,6 +2997,15 @@ def _run_contact_retrieval_thread(job_id: str):
             current["message"],
             payload={"results_count": len(cleaned)},
         )
+
+        # SSE: notify contacts phase complete
+        _sse_publish(job_id, "job_completed", {
+            "status": current.get("status", "COMPLETED"),
+            "total_leads": len(cleaned),
+            "phase": "contacts",
+            "contacts_status": current.get("contacts_status", "completed"),
+            "message": current["message"],
+        })
 
     except Exception as exc:
         failed = _load_job_state_with_fallback(job_id) or {}
@@ -3191,6 +3340,33 @@ def init_db():
 
 
 init_db()
+
+# Phase 2: Create unified jobs table and start sweeper
+try:
+    _ensure_jobs_table()
+    _start_sweeper()
+except Exception as _exc:
+    log.warning(f"Phase 2 queue init (non-fatal): {_exc}")
+
+# Phase 3: Register agents Blueprint
+app.register_blueprint(_agents_bp)
+
+# Phase 4: Intelligence routes
+app.register_blueprint(_intelligence_bp)
+
+# Phase 5: CRM / Outreach / Workflows
+app.register_blueprint(_crm_bp)
+app.register_blueprint(_outreach_bp)
+app.register_blueprint(_workflows_bp)
+
+# Phase A: SSE real-time streaming
+app.register_blueprint(_sse_bp)
+
+# Phase B: Extracted route modules (LinkedIn, Instagram, Webcrawler)
+# Pages and Health blueprints pending full route migration from this file.
+app.register_blueprint(_linkedin_bp)
+app.register_blueprint(_instagram_bp)
+app.register_blueprint(_webcrawler_bp)
 
 
 # ============================================================
@@ -3548,6 +3724,80 @@ class ScrapingJob:
             "elapsed_seconds": int(elapsed),
             "area_stats": area_stats,
         }
+
+# ============================================================
+# Phase 2: Queue job → API response helpers
+# ============================================================
+
+def _queue_job_to_status(qjob: dict, tool_type: str) -> dict:
+    """Convert a unified job row to the status response format the frontend expects."""
+    status = qjob.get("status", "queued")
+    created_at = qjob.get("created_at", "")
+    started_at = qjob.get("started_at")
+
+    # Compute elapsed
+    elapsed_seconds = 0
+    if started_at:
+        try:
+            start = datetime.fromisoformat(str(started_at))
+            elapsed_seconds = max(0, int((datetime.utcnow() - start).total_seconds()))
+        except (ValueError, TypeError):
+            pass
+    elif created_at:
+        try:
+            start = datetime.fromisoformat(str(created_at))
+            elapsed_seconds = max(0, int((datetime.utcnow() - start).total_seconds()))
+        except (ValueError, TypeError):
+            pass
+
+    h, rem = divmod(elapsed_seconds, 3600)
+    m, s = divmod(rem, 60)
+    elapsed_str = f"{h:02d}:{m:02d}:{s:02d}"
+
+    # Parse result JSON for stats
+    result_data = {}
+    try:
+        result_data = json.loads(qjob.get("result") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return {
+        "id": qjob["job_id"],
+        "status": status,
+        "progress": qjob.get("progress", 0),
+        "message": qjob.get("message", ""),
+        "lead_count": qjob.get("result_count", 0),
+        "error": qjob.get("error", ""),
+        "created_at": created_at,
+        "elapsed": elapsed_str,
+        "elapsed_seconds": elapsed_seconds,
+        "scrape_stats": result_data.get("area_stats", {}),
+        "attempt": qjob.get("attempt", 1),
+        "max_attempts": qjob.get("max_attempts", 3),
+        # Phase 3: agent execution info for UI badge
+        "execution_mode": qjob.get("execution_mode", "cloud"),
+        "agent_id": qjob.get("agent_id", ""),
+    }
+
+
+def _queue_job_results_response(qjob: dict):
+    """Convert a unified job row to the results response the frontend expects."""
+    status = qjob.get("status", "queued")
+    if status not in ("completed", "partial", "failed"):
+        return jsonify({"error": "Job not completed yet.", "status": status}), 400
+
+    result_data = {}
+    try:
+        result_data = json.loads(qjob.get("result") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    leads = result_data.get("leads", [])
+    return jsonify({
+        "leads": leads,
+        "total": len(leads),
+        "job": _queue_job_to_status(qjob, qjob.get("type", "")),
+    })
 
 
 class LinkedInJob:
@@ -4357,6 +4607,55 @@ def email_outreach_tool():
 def sessions_page():
     """Google Maps sessions page."""
     return render_template("sessions.html", active_page="sessions")
+
+
+@app.route("/intelligence")
+@login_required
+def page_intelligence():
+    """Lead Intelligence page — scored leads, signals, and insights."""
+    return render_template("intelligence.html", active_page="intelligence")
+
+
+# ── Phase 5: New goal-based page routes ───────────────────────────────────
+
+@app.route("/find-leads")
+@login_required
+def page_find_leads():
+    """Find Leads hub — entry point for all scraping tools."""
+    return render_template("find_leads.html", active_page="find_leads")
+
+
+@app.route("/pipeline")
+@login_required
+def page_pipeline():
+    """CRM Pipeline — Kanban board for lead management."""
+    return render_template("pipeline.html", active_page="pipeline")
+
+
+@app.route("/outreach")
+@login_required
+def page_outreach():
+    """Outreach — email campaign manager."""
+    return render_template("outreach.html", active_page="outreach")
+
+
+@app.route("/workflows")
+@login_required
+def page_workflows():
+    """Workflows — visual automation builder."""
+    return render_template("workflows.html", active_page="workflows")
+
+
+# ── Phase 5: Dashboard metrics API ────────────────────────────────────────
+
+@app.route("/api/dashboard/metrics")
+@login_required
+def api_dashboard_metrics():
+    """Return all 6 dashboard widget data in one JSON call."""
+    from dashboard.metrics import get_dashboard_metrics
+    uid  = int(session["user_id"])
+    days = int(request.args.get("days", 30))
+    return jsonify(get_dashboard_metrics(uid, days))
 
 
 # ============================================================
@@ -5597,298 +5896,75 @@ def gmaps_pause_extraction(job_id):
 
 
 # ============================================================
-# LinkedIn API
+# Phase 2: Queue Admin API
 # ============================================================
 
-@app.route("/api/linkedin/scrape", methods=["POST"])
+@app.route("/api/admin/queue-health")
 @subscription_required
-def linkedin_start_scrape():
-    """Start a new LinkedIn scraping job."""
-    data = request.get_json()
-    niche = data.get("niche", "").strip()
-    place = data.get("place", "").strip()
-    search_type = data.get("search_type", "profiles").strip()
+def api_queue_health():
+    """Return current queue depths and Redis status for monitoring."""
+    from jobs.queue import queue_health
+    from jobs.store import _get_db
 
-    if not niche or not place:
-        return jsonify({"error": "Both niche and place are required."}), 400
-    if search_type not in ("profiles", "companies"):
-        return jsonify({"error": "search_type must be 'profiles' or 'companies'."}), 400
-
-    job = LinkedInJob(niche, place, search_type)
-    linkedin_jobs[job.id] = job
-    _insert_history_direct(session["user_id"], job.id, "linkedin", niche, place, search_type)
-
-    thread = threading.Thread(target=run_linkedin_job, args=(job,), daemon=True)
-    thread.start()
-
-    return jsonify({"job_id": job.id, "message": "LinkedIn scraping started."}), 202
+    # Include agent online count
+    health = queue_health()
+    try:
+        db = _get_db()
+        row = db.execute(
+            "SELECT COUNT(*) FROM agents WHERE status IN ('online','busy')"
+        ).fetchone()
+        health["agents_online"] = row[0] if row else 0
+    except Exception:
+        health["agents_online"] = 0
+    return jsonify(health)
 
 
-@app.route("/api/linkedin/status/<job_id>")
-def linkedin_status(job_id):
-    job = linkedin_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    return jsonify(job.to_dict())
+@app.route("/api/agents/my-agent/status")
+def api_my_agent_status():
+    """Return current user's active agent status for the UI widget."""
+    if "user_id" not in session:
+        return jsonify({"status": "offline", "hostname": "", "agent_id": None})
+
+    from agents.service import get_active_agent_for_user
+    import json as _json
+    agent = get_active_agent_for_user(session["user_id"])
+    if not agent:
+        return jsonify({"status": "offline", "hostname": "", "agent_id": None})
+
+    return jsonify({
+        "status": agent.get("status", "offline"),
+        "hostname": agent.get("hostname", ""),
+        "agent_id": agent.get("agent_id"),
+        "version": agent.get("version", ""),
+        "platform": agent.get("platform", ""),
+        "capabilities": _json.loads(agent.get("capabilities") or "[]"),
+        "last_seen_at": agent.get("last_seen_at"),
+    })
 
 
-@app.route("/api/linkedin/results/<job_id>")
-def linkedin_results(job_id):
-    job = linkedin_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped"):
-        return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
-    return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
-
-
-@app.route("/api/linkedin/download/<job_id>")
-def linkedin_download(job_id):
-    job = linkedin_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped") or not job.leads:
-        return jsonify({"error": "No data available for download."}), 400
-
-    output = io.StringIO()
-
-    if job.search_type == "profiles":
-        fieldnames = ["Name", "Title", "Company", "Location", "Profile URL", "LinkedIn Username", "Snippet"]
-        key_map = {
-            "Name": "name", "Title": "title", "Company": "company",
-            "Location": "location", "Profile URL": "profile_url",
-            "LinkedIn Username": "linkedin_username", "Snippet": "snippet",
-        }
-    else:
-        fieldnames = ["Company Name", "Industry", "Size", "Location", "Company URL", "Description"]
-        key_map = {
-            "Company Name": "company_name", "Industry": "industry",
-            "Size": "company_size", "Location": "location",
-            "Company URL": "company_url", "Description": "description",
-        }
-
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for lead in job.leads:
-        row = {display: lead.get(key, "N/A") for display, key in key_map.items()}
-        writer.writerow(row)
-
-    output.seek(0)
-    filename = f"linkedin_{job.search_type}_{job.niche}_{job.place}.csv".replace(" ", "_").lower()
-    return Response(
-        output.getvalue(), mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-@app.route("/api/linkedin/stop/<job_id>", methods=["POST"])
-def linkedin_stop(job_id):
-    job = linkedin_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.scraper:
-        job.scraper.stop()
-        partial = job.scraper.get_partial_leads()
-        if partial:
-            cleaned = clean_linkedin_leads(partial, job.search_type)
-            job.leads = cleaned
-    job.status = "stopped"
-    job.message = f"Stopped by user. Saved {len(job.leads)} {job.search_type}."
-    return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
-
-
-# ============================================================
-# Instagram API
-# ============================================================
-
-@app.route("/api/instagram/scrape", methods=["POST"])
+@app.route("/api/jobs/<job_id>/status")
 @subscription_required
-def instagram_start_scrape():
-    """Start a new Instagram scraping job."""
-    data = request.get_json()
-    keywords = data.get("keywords", "").strip()
-    place = data.get("place", "").strip()
-    search_type = data.get("search_type", "emails").strip()
-
-    if not place:
-        return jsonify({"error": "Location is required."}), 400
-    search_type = _IG_TYPE_MAP.get(search_type, search_type)
-    if search_type not in ("profiles", "businesses"):
-        return jsonify({"error": "search_type must be 'profiles' or 'businesses'."}), 400
-
-    job = InstagramJob(keywords, place, search_type)
-    instagram_jobs[job.id] = job
-    _insert_history_direct(session["user_id"], job.id, "instagram", keywords, place, search_type)
-
-    thread = threading.Thread(target=run_instagram_job, args=(job,), daemon=True)
-    thread.start()
-
-    return jsonify({"job_id": job.id, "message": "Instagram scraping started."}), 202
-
-
-@app.route("/api/instagram/status/<job_id>")
-def instagram_status(job_id):
-    job = instagram_jobs.get(job_id)
-    if not job:
+def api_job_status(job_id):
+    """Unified job status endpoint — works for all tool types."""
+    qjob = _get_queue_job(job_id)
+    if not qjob:
         return jsonify({"error": "Job not found."}), 404
-    return jsonify(job.to_dict())
-
-
-@app.route("/api/instagram/results/<job_id>")
-def instagram_results(job_id):
-    job = instagram_jobs.get(job_id)
-    if not job:
+    if qjob.get("user_id") != session["user_id"]:
         return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped"):
-        return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
-    return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
+    return jsonify(_queue_job_to_status(qjob, qjob.get("type", "")))
 
 
-@app.route("/api/instagram/download/<job_id>")
-def instagram_download(job_id):
-    job = instagram_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped") or not job.leads:
-        return jsonify({"error": "No data available for download."}), 400
-
-    output = io.StringIO()
-
-    fieldnames = [
-        "Username", "Display Name", "Bio", "Email", "Phone",
-        "Website", "Category", "Followers", "Location", "Profile URL",
-    ]
-    key_map = {
-        "Username": "username", "Display Name": "display_name",
-        "Bio": "bio", "Email": "email", "Phone": "phone",
-        "Website": "website", "Category": "category",
-        "Followers": "followers", "Location": "location",
-        "Profile URL": "profile_url",
-    }
-
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for lead in job.leads:
-        row = {display: lead.get(key, "N/A") for display, key in key_map.items()}
-        writer.writerow(row)
-
-    output.seek(0)
-    filename = f"instagram_{job.search_type}_{job.place}.csv".replace(" ", "_").lower()
-    return Response(
-        output.getvalue(), mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-@app.route("/api/instagram/stop/<job_id>", methods=["POST"])
-def instagram_stop(job_id):
-    job = instagram_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.scraper:
-        job.scraper.stop()
-        partial = job.scraper.get_partial_leads()
-        if partial:
-            cleaned = clean_instagram_leads(partial, job.search_type)
-            job.leads = cleaned
-    job.status = "stopped"
-    job.message = f"Stopped by user. Saved {len(job.leads)} {job.search_type}."
-    return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
-
-
-# ============================================================
-# Web Crawler API
-# ============================================================
-
-@app.route("/api/webcrawler/scrape", methods=["POST"])
+@app.route("/api/jobs/<job_id>/stop", methods=["POST"])
 @subscription_required
-def webcrawler_start_scrape():
-    """Start a new Web Crawler scraping job."""
-    data = request.get_json()
-    keyword = data.get("keyword", "").strip()
-    place = data.get("place", "").strip()
-
-    if not keyword or not place:
-        return jsonify({"error": "Both keyword and place are required."}), 400
-
-    job = WebCrawlerJob(keyword, place)
-    webcrawler_jobs[job.id] = job
-    _insert_history_direct(session["user_id"], job.id, "webcrawler", keyword, place)
-
-    thread = threading.Thread(target=run_webcrawler_job, args=(job,), daemon=True)
-    thread.start()
-
-    return jsonify({"job_id": job.id, "message": "Web crawling started."}), 202
-
-
-@app.route("/api/webcrawler/status/<job_id>")
-def webcrawler_status(job_id):
-    job = webcrawler_jobs.get(job_id)
-    if not job:
+def api_job_stop(job_id):
+    """Unified stop endpoint for any queued job."""
+    qjob = _get_queue_job(job_id)
+    if not qjob:
         return jsonify({"error": "Job not found."}), 404
-    return jsonify(job.to_dict())
-
-
-@app.route("/api/webcrawler/results/<job_id>")
-def webcrawler_results(job_id):
-    job = webcrawler_jobs.get(job_id)
-    if not job:
+    if qjob.get("user_id") != session["user_id"]:
         return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped"):
-        return jsonify({"error": "Job not completed yet.", "status": job.status}), 400
-    return jsonify({"leads": job.leads, "total": len(job.leads), "job": job.to_dict()})
-
-
-@app.route("/api/webcrawler/download/<job_id>")
-def webcrawler_download(job_id):
-    job = webcrawler_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.status not in ("completed", "stopped") or not job.leads:
-        return jsonify({"error": "No data available for download."}), 400
-
-    output = io.StringIO()
-    fieldnames = [
-        "Business Name", "Phone", "Email", "Website", "Address",
-        "Description", "Source", "Facebook", "Instagram",
-        "Twitter", "LinkedIn", "YouTube",
-    ]
-    key_map = {
-        "Business Name": "business_name", "Phone": "phone",
-        "Email": "email", "Website": "website",
-        "Address": "address", "Description": "description",
-        "Source": "source", "Facebook": "facebook",
-        "Instagram": "instagram", "Twitter": "twitter",
-        "LinkedIn": "linkedin", "YouTube": "youtube",
-    }
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
-    writer.writeheader()
-    for lead in job.leads:
-        row = {display: lead.get(key, "N/A") for display, key in key_map.items()}
-        writer.writerow(row)
-
-    output.seek(0)
-    filename = f"webcrawler_{job.keyword}_{job.place}.csv".replace(" ", "_").lower()
-    return Response(
-        output.getvalue(), mimetype="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
-
-
-@app.route("/api/webcrawler/stop/<job_id>", methods=["POST"])
-def webcrawler_stop(job_id):
-    job = webcrawler_jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found."}), 404
-    if job.scraper:
-        job.scraper.stop()
-        partial = job.scraper.get_partial_leads()
-        if partial:
-            cleaned = clean_web_leads(partial)
-            job.leads = cleaned
-    job.status = "stopped"
-    job.message = f"Stopped by user. Saved {len(job.leads)} leads."
-    return jsonify({"message": f"Job stopped. {len(job.leads)} leads saved."})
+    _set_redis_stop(job_id)
+    return jsonify({"message": "Stop signal sent.", "job_id": job_id})
 
 
 # ============================================================
@@ -6694,4 +6770,10 @@ def ops_health_check():
 
 
 if __name__ == "__main__":
+    # Start Phase 5 background scheduler (campaign sender + workflow engine)
+    try:
+        from workflows.scheduler import start_scheduler
+        start_scheduler()
+    except Exception as _sch_exc:
+        log.warning(f"Phase 5 scheduler (non-fatal): {_sch_exc}")
     app.run(debug=True, port=5000)

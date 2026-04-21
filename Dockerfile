@@ -58,10 +58,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy ONLY production code (no desktop/build files)
 COPY app.py scraper.py linkedin_scraper.py instagram_scraper.py web_crawler.py ./
+COPY config.py ./
 COPY geo/ geo/
 COPY utils/ utils/
 COPY workers/ workers/
 COPY task_queue/ task_queue/
+COPY jobs/ jobs/
 COPY templates/ templates/
 COPY static/ static/
 

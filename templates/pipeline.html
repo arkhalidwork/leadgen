@@ -1,0 +1,181 @@
+{% extends "base.html" %}
+{% block title %}Pipeline — LeadGen{% endblock %}
+{% block content %}
+<!-- Pipeline header -->
+<div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+  <div>
+    <h1 class="page-title mb-0"><i class="bi bi-kanban-fill me-2" style="color:var(--accent)"></i>Pipeline</h1>
+    <p class="text-muted mb-0 small">Drag leads across stages to track your sales process.</p>
+  </div>
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm btn-outline-secondary" id="btnAddFromIntel" onclick="showAddFromIntelModal()">
+      <i class="bi bi-stars me-1"></i>Add from Intelligence
+    </button>
+    <button class="btn btn-sm btn-primary" onclick="showAddStageModal()">
+      <i class="bi bi-plus-lg me-1"></i>New Stage
+    </button>
+  </div>
+</div>
+
+<!-- Stage summary pills -->
+<div id="pipelineSummary" class="pipeline-summary mb-3"></div>
+
+<!-- Kanban Board -->
+<div id="kanbanBoard" class="kanban-board">
+  <div class="kanban-loading">
+    <div class="spinner-border text-primary" role="status"></div>
+    <span class="ms-2 text-muted">Loading pipeline…</span>
+  </div>
+</div>
+
+<!-- Activity Drawer -->
+<div class="activity-drawer" id="activityDrawer">
+  <div class="activity-drawer-header">
+    <h6 id="drawerTitle" class="mb-0">Activity</h6>
+    <button class="btn-close btn-close-white" onclick="closeDrawer()"></button>
+  </div>
+  <div id="activityList" class="activity-list"></div>
+  <div class="activity-note-form">
+    <textarea id="noteInput" class="form-control form-control-sm bg-dark text-white border-secondary"
+              rows="2" placeholder="Add a note…"></textarea>
+    <button class="btn btn-sm btn-primary mt-2 w-100" onclick="submitNote()">Save Note</button>
+  </div>
+</div>
+
+<!-- Add from Intelligence Modal -->
+<div class="modal fade" id="addFromIntelModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="bi bi-stars me-2 text-warning"></i>Add Leads from Intelligence</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label class="form-label small text-muted">Filter by Tier</label>
+            <select id="intelTierFilter" class="form-select form-select-sm bg-dark text-white border-secondary">
+              <option value="">All tiers</option>
+              <option value="hot" selected>🔥 Hot only</option>
+              <option value="warm">🌤 Warm</option>
+              <option value="cold">❄️ Cold</option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label class="form-label small text-muted">Add to Stage</label>
+            <select id="intelStageSelect" class="form-select form-select-sm bg-dark text-white border-secondary"></select>
+          </div>
+        </div>
+        <p class="text-muted small" id="intelAddMsg">Select tier and target stage, then click Add.</p>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="addFromIntelligence()">
+          <i class="bi bi-plus-lg me-1"></i>Add Leads
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Stage Modal -->
+<div class="modal fade" id="addStageModal" tabindex="-1">
+  <div class="modal-dialog modal-sm">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">New Stage</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <input type="text" id="newStageName" class="form-control bg-dark text-white border-secondary" placeholder="Stage name…">
+        <div class="mt-2 d-flex gap-2 flex-wrap" id="colorPicker">
+          {% for clr in ['#6366f1','#3B82F6','#10B981','#F59E0B','#EF4444','#8B5CF6','#EC4899','#6B7280'] %}
+          <div class="color-swatch {% if loop.first %}selected{% endif %}"
+               style="background:{{ clr }}" data-color="{{ clr }}"
+               onclick="selectColor(this)"></div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="createStage()">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="pipelineToast" class="toast align-items-center text-white border-0 position-fixed bottom-0 end-0 m-3"
+     role="alert" style="z-index:9999">
+  <div class="d-flex">
+    <div class="toast-body" id="toastBody"></div>
+    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+  </div>
+</div>
+
+<style>
+.kanban-board {
+  display: flex; gap: 1rem; overflow-x: auto;
+  padding-bottom: 1.5rem; min-height: 65vh;
+  align-items: flex-start;
+}
+.kanban-column {
+  min-width: 260px; width: 260px; flex-shrink: 0;
+  background: var(--card-bg, #1e1e2e);
+  border: 1px solid var(--border-color, rgba(255,255,255,.07));
+  border-radius: 14px; overflow: hidden;
+  display: flex; flex-direction: column; max-height: 75vh;
+}
+.kanban-col-header {
+  padding: .75rem 1rem;
+  display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid rgba(255,255,255,.06);
+  position: sticky; top: 0;
+}
+.kanban-col-title { font-size: .85rem; font-weight: 700; display: flex; align-items: center; gap: .5rem }
+.kanban-count    { font-size: .72rem; background: rgba(255,255,255,.1); border-radius: 999px; padding: 1px 8px }
+.kanban-col-body { flex: 1; overflow-y: auto; padding: .6rem; display: flex; flex-direction: column; gap: .5rem; min-height: 60px; }
+.kanban-card {
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.07);
+  border-radius: 10px; padding: .75rem .85rem;
+  cursor: grab; transition: box-shadow .15s, transform .15s;
+  user-select: none;
+}
+.kanban-card:hover { box-shadow: 0 4px 16px rgba(0,0,0,.3); transform: translateY(-1px) }
+.kanban-card.drag-ghost { opacity: .4 }
+.kanban-card-name { font-size: .85rem; font-weight: 600; margin-bottom: .2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.kanban-card-meta { font-size: .72rem; color: var(--text-muted,#aaa); display: flex; align-items: center; gap: .5rem; flex-wrap: wrap }
+.tier-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block }
+.tier-hot  { background:#f97316 } .tier-warm { background:#facc15 }
+.tier-cold { background:#60a5fa } .tier-dead { background:#6b7280 }
+.kanban-card-actions { display: flex; gap: .4rem; margin-top: .5rem }
+.pipeline-summary { display: flex; gap: .75rem; flex-wrap: wrap }
+.summary-pill {
+  font-size: .75rem; padding: .3rem .75rem;
+  border-radius: 999px; border: 1px solid rgba(255,255,255,.1);
+  display: flex; align-items: center; gap: .4rem;
+}
+.activity-drawer {
+  position: fixed; right: -380px; top: 0; bottom: 0;
+  width: 360px; background: #13131f;
+  border-left: 1px solid rgba(255,255,255,.1);
+  z-index: 1050; transition: right .3s ease;
+  display: flex; flex-direction: column; padding: 1.25rem;
+}
+.activity-drawer.open { right: 0 }
+.activity-drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem }
+.activity-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: .5rem }
+.activity-item { font-size: .8rem; padding: .6rem; border-radius: 8px; background: rgba(255,255,255,.04) }
+.activity-item .act-type { font-weight: 600; color: var(--accent,#6366f1) }
+.activity-note-form { margin-top: 1rem }
+.color-swatch { width: 24px; height: 24px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: border-color .15s }
+.color-swatch.selected { border-color: #fff }
+.kanban-loading { display: flex; align-items: center; justify-content: center; width: 100%; padding: 3rem; color: #aaa }
+.kanban-empty-col { text-align: center; padding: 1.5rem .5rem; color: #555; font-size: .78rem }
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<script src="/static/js/pipeline.js"></script>
+<script>window.addEventListener('DOMContentLoaded', PipelineApp.init)</script>
+{% endblock %}

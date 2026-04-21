@@ -33,39 +33,41 @@
             href="/dashboard"
             class="sidebar-link {% if active_page == 'dashboard' %}active{% endif %}"
           >
-            <i class="bi bi-grid-1x2-fill"></i><span>Dashboard</span>
+            <i class="bi bi-bar-chart-fill"></i><span>Dashboard</span>
           </a>
 
-          <div class="sidebar-section-label mt-3">Tools</div>
+          <div class="sidebar-section-label mt-3">Find</div>
           <a
-            href="/tools/google-maps"
-            class="sidebar-link {% if active_page == 'gmaps' %}active{% endif %}"
+            href="/find-leads"
+            class="sidebar-link {% if active_page == 'find_leads' or active_page in ['gmaps','linkedin','instagram','webcrawler'] %}active{% endif %}"
           >
-            <i class="bi bi-geo-alt-fill"></i><span>Google Maps</span>
+            <i class="bi bi-search-heart"></i><span>Find Leads</span>
+          </a>
+
+          <div class="sidebar-section-label mt-3">Manage</div>
+          <a
+            href="/intelligence"
+            class="sidebar-link {% if active_page == 'intelligence' %}active{% endif %}"
+          >
+            <i class="bi bi-stars"></i><span>Intelligence</span>
           </a>
           <a
-            href="/tools/linkedin"
-            class="sidebar-link {% if active_page == 'linkedin' %}active{% endif %}"
+            href="/pipeline"
+            class="sidebar-link {% if active_page == 'pipeline' %}active{% endif %}"
           >
-            <i class="bi bi-linkedin"></i><span>LinkedIn</span>
+            <i class="bi bi-kanban-fill"></i><span>Pipeline</span>
           </a>
           <a
-            href="/tools/instagram"
-            class="sidebar-link {% if active_page == 'instagram' %}active{% endif %}"
+            href="/outreach"
+            class="sidebar-link {% if active_page == 'outreach' %}active{% endif %}"
           >
-            <i class="bi bi-instagram"></i><span>Instagram</span>
+            <i class="bi bi-send-fill"></i><span>Outreach</span>
           </a>
           <a
-            href="/tools/web-crawler"
-            class="sidebar-link {% if active_page == 'webcrawler' %}active{% endif %}"
+            href="/workflows"
+            class="sidebar-link {% if active_page == 'workflows' %}active{% endif %}"
           >
-            <i class="bi bi-globe2"></i><span>Web Crawler</span>
-          </a>
-          <a
-            href="/tools/email-outreach"
-            class="sidebar-link {% if active_page == 'email_outreach' %}active{% endif %}"
-          >
-            <i class="bi bi-envelope-paper-fill"></i><span>Email Outreach</span>
+            <i class="bi bi-diagram-3-fill"></i><span>Workflows</span>
           </a>
 
           <div class="sidebar-section-label mt-3">Data</div>
@@ -109,6 +111,12 @@
               <i class="bi bi-box-arrow-right"></i>
             </a>
           </div>
+        </div>
+
+        <!-- Phase 3: Local Agent Status Widget -->
+        <div class="agent-status-widget mt-2 mx-2" id="agentStatusWidget" title="Local Agent Status">
+          <span class="agent-dot agent-dot--offline" id="agentDot"></span>
+          <span id="agentStatusText" style="font-size:0.76rem">No Agent</span>
         </div>
       </aside>
 
@@ -177,6 +185,34 @@
           }
         })
         .catch(() => {});
+
+      // Phase 3: Agent status widget polling
+      async function refreshAgentStatus() {
+        try {
+          const r = await fetch('/api/agents/my-agent/status');
+          if (!r.ok) return;
+          const d = await r.json();
+          const dot = document.getElementById('agentDot');
+          const txt = document.getElementById('agentStatusText');
+          if (!dot || !txt) return;
+          const status = d.status || 'offline';
+          dot.className = 'agent-dot agent-dot--' + status;
+          if (status === 'online') {
+            txt.textContent = d.hostname ? d.hostname.split('.')[0] : 'Agent Online';
+          } else if (status === 'busy') {
+            txt.textContent = 'Agent Running...';
+          } else {
+            txt.textContent = 'No Agent';
+          }
+          // Add tooltip with full details
+          const widget = document.getElementById('agentStatusWidget');
+          if (widget && d.agent_id) {
+            widget.title = `${d.hostname} · v${d.version || '?'} · ${d.platform || ''}`;
+          }
+        } catch (e) { /* silently skip */ }
+      }
+      refreshAgentStatus();
+      setInterval(refreshAgentStatus, 12000);
     </script>
     {% block extra_js %}{% endblock %}
   </body>

@@ -121,10 +121,16 @@ class GoogleMapsScraper:
         self.driver = None
         self._progress_callback = None
         self._should_stop = False
-        self._website_workers = max(1, int(os.environ.get("LEADGEN_WEBSITE_WORKERS", "5")))
-        self._website_timeout_seconds = max(2.0, float(os.environ.get("LEADGEN_WEBSITE_TIMEOUT_SECONDS", "10")))
+        self._website_workers = max(1, int(os.environ.get("LEADGEN_WEBSITE_WORKERS", "20")))
+        self._website_timeout_seconds = max(2.0, float(os.environ.get("LEADGEN_WEBSITE_TIMEOUT_SECONDS", "8")))
         self._max_pages_per_website = max(1, int(os.environ.get("LEADGEN_WEBSITE_MAX_PAGES", "3")))
         self._max_scroll_attempts = max(30, int(os.environ.get("LEADGEN_SCROLL_ATTEMPTS", "120")))
+        # Shared HTTP adapter for connection-pool reuse across parallel workers
+        self._http_adapter = requests.adapters.HTTPAdapter(
+            pool_connections=self._website_workers,
+            pool_maxsize=self._website_workers * 2,
+            max_retries=0,
+        )
 
         # --- Live tracking ---
         self._area_stats = {
@@ -154,14 +160,9 @@ class GoogleMapsScraper:
             "Accept": "text/html,application/xhtml+xml",
             "Accept-Language": "en-US,en;q=0.9",
         })
-        # No retries — fail fast on unreachable sites
-        adapter = HTTPAdapter(
-            pool_connections=8,
-            pool_maxsize=8,
-            max_retries=Retry(total=0),
-        )
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
+        # Mount shared adapter — reuses TCP connections + DNS cache across workers
+        session.mount("https://", self._http_adapter)
+        session.mount("http://", self._http_adapter)
         return session
 
     def set_progress_callback(self, callback):
@@ -644,6 +645,7 @@ class GoogleMapsScraper:
         force_primary_keyword_only: bool = False,
         max_leads: int | None = None,
         crawl_contacts: bool = True,
+        on_lead_found: Callable[[dict, int], None] | None = None,
     ) -> list[dict]:
         """
         Main scraping pipeline with 3-phase architecture:
@@ -886,8 +888,17 @@ class GoogleMapsScraper:
                     lead = self._extract_business_detail(url)
                     if lead.business_name and lead.business_name != "Unknown":
                         all_leads.append(lead)
+                        lead_dict = asdict(lead)
                         self._partial_leads = [asdict(l) for l in all_leads]
                         self._area_stats["leads_found"] = len(all_leads)
+
+                        # SSE hook: notify frontend immediately about this lead
+                        if on_lead_found:
+                            try:
+                                on_lead_found(lead_dict, len(all_leads) - 1)
+                            except Exception:
+                                pass  # never let callback failure stop the scrape
+
                         if max_leads and len(all_leads) >= max_leads:
                             self._report_progress(
                                 f"Lead limit reached ({max_leads}) during business extraction.",
@@ -1016,6 +1027,7 @@ class GoogleMapsScraper:
         progress_callback: Callable[[str, int], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
         should_pause: Callable[[], bool] | None = None,
+        on_contact_found: Callable[[int, dict], None] | None = None,
     ) -> list[dict]:
         """Enrich existing leads with website contacts using parallel crawling."""
         self._should_stop = False
@@ -1066,6 +1078,9 @@ class GoogleMapsScraper:
             2,
         )
 
+        # O(1) lookup: object id → index in lead_objs (used by SSE callback)
+        _lead_index_map = {id(lead): i for i, lead in enumerate(lead_objs)}
+
         with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
             futures = {
                 executor.submit(self._scrape_website, lead): lead
@@ -1093,15 +1108,37 @@ class GoogleMapsScraper:
                 except Exception as e:
                     logger.debug(f"Website crawl skipped for {lead.business_name} ({lead.website}): {e}")
 
-                if lead.email and lead.email != "N/A":
+                enriched = lead.email and lead.email != "N/A"
+                if enriched:
                     enriched_count += 1
 
                 self._area_stats["websites_scanned"] = processed
                 self._partial_leads = [asdict(l) for l in lead_objs]
 
+                # SSE hook: push only the changed contact fields (minimal payload)
+                if on_contact_found:
+                    try:
+                        lead_index = _lead_index_map.get(id(lead), -1)
+                        if lead_index >= 0:
+                            socials = {
+                                k: getattr(lead, k, "") for k in (
+                                    "facebook", "instagram", "twitter",
+                                    "linkedin", "youtube", "tiktok", "pinterest"
+                                )
+                                if getattr(lead, k, "")
+                            }
+                            on_contact_found(lead_index, {
+                                "email": lead.email or "",
+                                "phone": lead.phone or "",
+                                "socials": socials,
+                            })
+                    except Exception:
+                        pass  # never let callback failure stop crawling
+
                 pct = 2 + int((processed / total_targets) * 95)
                 self._report_progress(
-                    f"Contact retrieval: {processed}/{total_targets} websites (emails found: {enriched_count})",
+                    f"Contact retrieval: {processed}/{total_targets} websites "
+                    f"(emails found: {enriched_count})",
                     min(99, pct),
                 )
 
@@ -1152,23 +1189,25 @@ class GoogleMapsScraper:
             if self._should_stop:
                 break
             page_url = pages_to_check.popleft()
-            try:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
 
-                # Short connect timeout (2s) to fail fast on unreachable hosts
-                read_timeout = min(4.0, max(1.0, remaining))
+            # Hard deadline check at top to avoid wasted future.result() timeout
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+
+            try:
+                # 1.5s connect (fail fast on dead hosts), 3s read max per page
+                read_timeout = min(3.0, max(1.0, remaining))
                 resp = session.get(
                     page_url,
-                    timeout=(2.0, read_timeout),
+                    timeout=(1.5, read_timeout),
                     allow_redirects=True,
                 )
-                if resp.status_code == 404 or resp.status_code >= 400:
+                # Skip client errors (404) and server errors (5xx) immediately
+                if resp.status_code >= 400:
                     continue
 
                 pages_checked += 1
-
                 homepage_reachable = True
                 content_type = (resp.headers.get("Content-Type") or "").lower()
                 if "text/html" not in content_type and "application/xhtml+xml" not in content_type:

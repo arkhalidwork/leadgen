@@ -1,0 +1,269 @@
+{% extends "base.html" %}
+{% block title %}Outreach — LeadGen{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+  <div>
+    <h1 class="page-title mb-0"><i class="bi bi-send-fill me-2" style="color:var(--accent)"></i>Outreach</h1>
+    <p class="text-muted mb-0 small">Build multi-step email sequences. AI personalizes every message.</p>
+  </div>
+  <div class="d-flex gap-2">
+    <button class="btn btn-sm btn-outline-secondary" onclick="openSmtpModal()">
+      <i class="bi bi-gear me-1"></i>SMTP Config
+    </button>
+    <button class="btn btn-sm btn-primary" onclick="showCreateCampaign()">
+      <i class="bi bi-plus-lg me-1"></i>New Campaign
+    </button>
+  </div>
+</div>
+
+<!-- Campaign list / Builder toggle -->
+<div id="outreachView">
+  <!-- Campaign List -->
+  <div id="campaignListView">
+    <div id="campaignList" class="campaign-list"></div>
+    <div id="campaignEmpty" class="empty-state" style="display:none">
+      <i class="bi bi-send" style="font-size:2.5rem;color:#555"></i>
+      <p class="mt-2 text-muted">No campaigns yet. Create one to start sending sequences.</p>
+      <button class="btn btn-primary btn-sm mt-1" onclick="showCreateCampaign()">Create Campaign</button>
+    </div>
+  </div>
+
+  <!-- Campaign Builder (hidden until a campaign is selected/created) -->
+  <div id="campaignBuilder" style="display:none">
+    <div class="d-flex align-items-center gap-2 mb-3">
+      <button class="btn btn-sm btn-outline-secondary" onclick="backToList()">
+        <i class="bi bi-arrow-left"></i>
+      </button>
+      <h5 class="mb-0" id="builderCampaignName">Campaign</h5>
+      <span id="builderStatusBadge" class="badge bg-secondary ms-2">Draft</span>
+      <div class="ms-auto d-flex gap-2">
+        <button class="btn btn-sm btn-outline-success" onclick="activateCampaign()" id="btnActivate">
+          <i class="bi bi-play-fill me-1"></i>Activate
+        </button>
+        <button class="btn btn-sm btn-outline-primary" onclick="addStep()">
+          <i class="bi bi-plus-lg me-1"></i>Add Step
+        </button>
+      </div>
+    </div>
+
+    <!-- Campaign stats row -->
+    <div id="campaignStats" class="campaign-stats-row mb-3"></div>
+
+    <!-- Sequence Timeline -->
+    <div id="sequenceTimeline" class="sequence-timeline mb-4"></div>
+
+    <!-- Step Editor Panel -->
+    <div id="stepEditor" class="step-editor" style="display:none">
+      <div class="step-editor-header">
+        <h6 class="mb-0" id="editorStepTitle">Step 1</h6>
+        <button class="btn-close btn-close-white" onclick="closeStepEditor()"></button>
+      </div>
+      <div class="step-editor-body">
+        <div class="row g-3 mb-3">
+          <div class="col-md-4">
+            <label class="form-label small text-muted">Send after (days)</label>
+            <input type="number" id="editorDelay" class="form-control form-control-sm bg-dark text-white border-secondary" value="0" min="0">
+          </div>
+          <div class="col-md-4">
+            <label class="form-label small text-muted">Tone</label>
+            <select id="editorTone" class="form-select form-select-sm bg-dark text-white border-secondary">
+              <option value="professional">Professional</option>
+              <option value="friendly">Friendly</option>
+              <option value="direct">Direct</option>
+              <option value="consultative">Consultative</option>
+              <option value="witty">Witty</option>
+            </select>
+          </div>
+          <div class="col-md-4 d-flex align-items-end">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" id="editorIsAI" role="switch">
+              <label class="form-check-label small" for="editorIsAI">AI Personalize</label>
+            </div>
+          </div>
+        </div>
+        <div class="mb-2">
+          <label class="form-label small text-muted">Subject</label>
+          <input type="text" id="editorSubject" class="form-control form-control-sm bg-dark text-white border-secondary"
+                 placeholder="Hey {{name}}, quick question about {{business}}">
+        </div>
+        <div class="mb-2">
+          <label class="form-label small text-muted">Body (HTML supported)</label>
+          <textarea id="editorBody" class="form-control bg-dark text-white border-secondary"
+                    rows="8" placeholder="<p>Hi {{name}},</p>&#10;<p>{{top_signal}}...</p>"></textarea>
+        </div>
+        <div class="token-chips mb-3">
+          <span class="text-muted small me-2">Tokens:</span>
+          {% for tok in ['{{name}}','{{business}}','{{city}}','{{category}}','{{top_signal}}','{{insight}}','{{weakness}}','{{rating}}'] %}
+          <span class="token-chip" onclick="insertToken('{{ tok }}')">{{ tok }}</span>
+          {% endfor %}
+        </div>
+        <div class="d-flex gap-2">
+          <button class="btn btn-primary btn-sm" onclick="saveStep()">Save Step</button>
+          <button class="btn btn-outline-danger btn-sm" onclick="deleteStep()">Delete Step</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Enrolled Leads -->
+    <div class="card-panel mt-3">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h6 class="mb-0">Enrolled Leads</h6>
+        <button class="btn btn-sm btn-outline-primary" onclick="showEnrollModal()">
+          <i class="bi bi-person-plus me-1"></i>Enroll Leads
+        </button>
+      </div>
+      <div id="enrolledLeadsList" class="enrolled-list"></div>
+    </div>
+  </div>
+</div>
+
+<!-- SMTP Modal -->
+<div class="modal fade" id="smtpModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title"><i class="bi bi-envelope-gear me-2"></i>Email / SMTP Config</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3">
+          <label class="form-label small text-muted">Provider</label>
+          <select id="smtpProvider" class="form-select bg-dark text-white border-secondary">
+            <option value="smtp">SMTP (Gmail, Zoho, custom)</option>
+            <option value="sendgrid">SendGrid</option>
+            <option value="mailgun">Mailgun</option>
+          </select>
+        </div>
+        <div id="smtpFields">
+          <div class="row g-2 mb-2">
+            <div class="col-8"><input id="smtpHost" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="smtp.gmail.com"></div>
+            <div class="col-4"><input id="smtpPort" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="587" type="number"></div>
+          </div>
+          <input id="smtpUser" class="form-control form-control-sm bg-dark text-white border-secondary mb-2" placeholder="your@email.com">
+          <input id="smtpPass" type="password" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="App password or password">
+        </div>
+        <div id="smtpVerifyResult" class="mt-2"></div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-sm btn-outline-secondary" onclick="verifySmtp()"><i class="bi bi-check2-circle me-1"></i>Test Connection</button>
+        <button class="btn btn-sm btn-primary" onclick="saveSmtp()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Campaign Modal -->
+<div class="modal fade" id="createCampaignModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">New Campaign</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-2"><input id="newCampName" class="form-control bg-dark text-white border-secondary" placeholder="Campaign name"></div>
+        <div class="mb-2"><input id="newCampFromEmail" class="form-control bg-dark text-white border-secondary" placeholder="From email"></div>
+        <div class="mb-2"><input id="newCampFromName"  class="form-control bg-dark text-white border-secondary" placeholder="From name"></div>
+        <div class="mb-2"><input id="newCampLimit" type="number" class="form-control bg-dark text-white border-secondary" placeholder="Daily send limit" value="50"></div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="createCampaign()">Create</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Enroll Modal -->
+<div class="modal fade" id="enrollModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title">Enroll Leads</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small mb-2">Enroll leads from Intelligence by tier:</p>
+        <div class="d-flex gap-2 flex-wrap">
+          <button class="btn btn-sm btn-outline-warning" onclick="enrollByTier('hot')">🔥 All Hot Leads</button>
+          <button class="btn btn-sm btn-outline-info" onclick="enrollByTier('warm')">🌤 All Warm Leads</button>
+        </div>
+        <p class="text-muted small mt-3 mb-1">or enter lead IDs (comma separated):</p>
+        <input id="enrollLeadIds" class="form-control form-control-sm bg-dark text-white border-secondary" placeholder="1, 2, 3, ...">
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="enrollCustom()">Enroll</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.campaign-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px,1fr)); gap: 1rem }
+.campaign-card {
+  background: var(--card-bg,#1e1e2e); border: 1px solid var(--border-color,rgba(255,255,255,.07));
+  border-radius: 14px; padding: 1.25rem; cursor: pointer;
+  transition: transform .2s, box-shadow .2s, border-color .2s;
+}
+.campaign-card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,.3); border-color: var(--accent,#6366f1) }
+.campaign-card-name { font-weight: 700; font-size: .95rem; margin-bottom: .3rem }
+.campaign-stats-row { display: flex; gap: 1rem; flex-wrap: wrap }
+.campaign-stat-box {
+  background: var(--card-bg,#1e1e2e); border: 1px solid rgba(255,255,255,.07);
+  border-radius: 10px; padding: .75rem 1.25rem; text-align: center; min-width: 90px;
+}
+.campaign-stat-box .val { font-size: 1.4rem; font-weight: 800; color: var(--accent,#6366f1) }
+.campaign-stat-box .lbl { font-size: .68rem; color: #aaa; text-transform: uppercase; letter-spacing: .05em }
+
+/* Sequence timeline */
+.sequence-timeline { display: flex; align-items: flex-start; gap: 0; overflow-x: auto; padding-bottom: .5rem }
+.seq-step {
+  display: flex; align-items: center; flex-shrink: 0;
+}
+.seq-node {
+  background: var(--card-bg,#1e1e2e); border: 2px solid var(--accent,#6366f1);
+  border-radius: 12px; padding: .75rem 1rem; min-width: 150px; max-width: 180px;
+  cursor: pointer; transition: box-shadow .2s;
+  text-align: center;
+}
+.seq-node:hover { box-shadow: 0 0 0 3px rgba(99,102,241,.3) }
+.seq-node.active-step { box-shadow: 0 0 0 3px rgba(99,102,241,.5) }
+.seq-node-day { font-size: .65rem; color: #888; text-transform: uppercase; margin-bottom: .2rem }
+.seq-node-title { font-size: .82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.seq-connector { color: var(--accent,#6366f1); font-size: 1.2rem; padding: 0 .4rem; flex-shrink: 0; position: relative; top: -10px }
+.seq-add {
+  background: rgba(99,102,241,.1); border: 2px dashed rgba(99,102,241,.4);
+  border-radius: 12px; padding: .65rem 1rem; min-width: 100px;
+  cursor: pointer; text-align: center; color: #888; font-size: .78rem;
+  transition: border-color .2s, color .2s;
+}
+.seq-add:hover { border-color: var(--accent,#6366f1); color: var(--accent,#6366f1) }
+
+/* Step editor */
+.step-editor {
+  background: var(--card-bg,#1e1e2e); border: 1px solid rgba(99,102,241,.3);
+  border-radius: 14px; overflow: hidden; margin-bottom: 1rem;
+}
+.step-editor-header {
+  background: rgba(99,102,241,.12); padding: .75rem 1.25rem;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.step-editor-body { padding: 1.25rem }
+.token-chip {
+  font-size: .7rem; padding: 2px 8px; background: rgba(99,102,241,.15);
+  color: var(--accent,#6366f1); border: 1px solid rgba(99,102,241,.3);
+  border-radius: 999px; cursor: pointer; transition: background .15s; margin-right: .3rem; margin-bottom: .3rem; display: inline-block;
+}
+.token-chip:hover { background: rgba(99,102,241,.35) }
+.enrolled-list { display: flex; flex-direction: column; gap: .35rem; max-height: 220px; overflow-y: auto }
+.enrolled-row { display: flex; align-items: center; gap: .75rem; font-size: .8rem; padding: .4rem .6rem; background: rgba(255,255,255,.03); border-radius: 8px }
+.card-panel {
+  background: var(--card-bg,#1e1e2e); border: 1px solid rgba(255,255,255,.07);
+  border-radius: 14px; padding: 1.25rem;
+}
+</style>
+
+<script src="/static/js/outreach.js"></script>
+<script>window.addEventListener('DOMContentLoaded', OutreachApp.init)</script>
+{% endblock %}

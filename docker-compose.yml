@@ -13,6 +13,7 @@ services:
       - LEADGEN_DB_PATH=/app/data/leadgen.db
       - LEADGEN_POSTGRES_DSN=${LEADGEN_POSTGRES_DSN:-postgresql://leadgen:leadgen@postgres:5432/leadgen}
       - LEADGEN_OUTPUT_DIR=/app/output
+      - REDIS_HOST=redis
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
     restart: unless-stopped
@@ -33,6 +34,94 @@ services:
         max-size: "10m"
         max-file: "3"
     depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # --- Phase 2: Redis Queue ---
+  redis:
+    image: redis:7-alpine
+    container_name: leadgen-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - leadgen-redis:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # --- Phase 2: Worker for lightweight jobs (LinkedIn, Instagram, WebCrawler) ---
+  worker-default:
+    build: .
+    container_name: leadgen-worker-default
+    command: python -m workers.worker --queue default
+    volumes:
+      - leadgen-output:/app/output
+      - leadgen-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - LEADGEN_DB_PATH=/app/data/leadgen.db
+      - LEADGEN_POSTGRES_DSN=${LEADGEN_POSTGRES_DSN:-postgresql://leadgen:leadgen@postgres:5432/leadgen}
+      - LEADGEN_OUTPUT_DIR=/app/output
+      - REDIS_HOST=redis
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- Phase 2: Worker for heavy jobs (Google Maps / Selenium) ---
+  worker-heavy:
+    build: .
+    container_name: leadgen-worker-heavy
+    command: python -m workers.worker --queue heavy
+    volumes:
+      - leadgen-output:/app/output
+      - leadgen-data:/app/data
+    env_file:
+      - .env
+    environment:
+      - LEADGEN_DB_PATH=/app/data/leadgen.db
+      - LEADGEN_POSTGRES_DSN=${LEADGEN_POSTGRES_DSN:-postgresql://leadgen:leadgen@postgres:5432/leadgen}
+      - LEADGEN_OUTPUT_DIR=/app/output
+      - REDIS_HOST=redis
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    shm_size: "2gb"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 6G
+        reservations:
+          cpus: "0.5"
+          memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      redis:
+        condition: service_healthy
       postgres:
         condition: service_healthy
 
@@ -56,3 +145,4 @@ volumes:
   leadgen-output:
   leadgen-data:
   leadgen-postgres:
+  leadgen-redis:

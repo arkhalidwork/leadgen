@@ -11,10 +11,14 @@ ProgressCallback = Callable[[str, int, dict | None], None]
 ShouldStopCallback = Callable[[], bool]
 
 
+OnLeadFoundCallback = Callable[[dict, int], None]
+
+
 def run_scraper_job(
     payload: JobInput,
     progress_callback: ProgressCallback | None = None,
     should_stop: ShouldStopCallback | None = None,
+    on_lead_found: OnLeadFoundCallback | None = None,
 ) -> dict:
     """
     Stateless worker entry point for Google Maps scraping.
@@ -97,6 +101,7 @@ def run_scraper_job(
             force_primary_keyword_only=bool(forced_geo_cells),
             max_leads=max_leads,
             crawl_contacts=crawl_contacts,
+            on_lead_found=on_lead_found,
         )
 
         # Light cleanup: normalize fields, but do NOT aggressively deduplicate

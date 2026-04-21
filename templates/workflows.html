@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}Workflows — LeadGen{% endblock %}
+{% block content %}
+<div class="d-flex align-items-center justify-content-between mb-4 flex-wrap gap-2">
+  <div>
+    <h1 class="page-title mb-0"><i class="bi bi-diagram-3-fill me-2" style="color:var(--accent)"></i>Workflows</h1>
+    <p class="text-muted mb-0 small">Automate your lead generation — triggers run actions without you.</p>
+  </div>
+  <button class="btn btn-primary btn-sm" onclick="WorkflowApp.showCreateModal()">
+    <i class="bi bi-plus-lg me-1"></i>New Workflow
+  </button>
+</div>
+
+<!-- Workflow templates quick-start -->
+<div class="wf-templates mb-4">
+  <div class="wf-template-label text-muted small mb-2"><i class="bi bi-lightning-fill me-1 text-warning"></i>Quick Templates</div>
+  <div class="d-flex gap-2 flex-wrap">
+    <button class="btn btn-sm btn-outline-secondary wf-template-btn" onclick="WorkflowApp.applyTemplate('hot_to_pipeline')">
+      🔥 Hot Lead → Pipeline
+    </button>
+    <button class="btn btn-sm btn-outline-secondary wf-template-btn" onclick="WorkflowApp.applyTemplate('daily_scrape')">
+      📅 Daily Scrape → Enrich
+    </button>
+    <button class="btn btn-sm btn-outline-secondary wf-template-btn" onclick="WorkflowApp.applyTemplate('reply_to_stage')">
+      💬 Reply → Move Stage
+    </button>
+    <button class="btn btn-sm btn-outline-secondary wf-template-btn" onclick="WorkflowApp.applyTemplate('hot_to_campaign')">
+      ✉️ Hot Lead → Campaign
+    </button>
+  </div>
+</div>
+
+<!-- Workflow list -->
+<div id="workflowList" class="workflow-list">
+  <div class="text-center text-muted py-5">
+    <div class="spinner-border text-primary" role="status"></div>
+  </div>
+</div>
+
+<!-- Workflow Builder Modal -->
+<div class="modal fade" id="wfBuilderModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="wfModalTitle">New Workflow</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Name -->
+        <div class="mb-3">
+          <input type="text" id="wfName" class="form-control bg-dark text-white border-secondary"
+                 placeholder="Workflow name…">
+        </div>
+        <!-- Visual node chain -->
+        <div class="wf-builder-chain" id="wfBuilderChain">
+          <!-- Trigger node -->
+          <div class="wf-builder-node trigger-node" id="triggerNode">
+            <div class="wfn-label">⚡ TRIGGER</div>
+            <select id="triggerType" class="form-select form-select-sm bg-dark text-white border-secondary mt-2"
+                    onchange="WorkflowApp.onTriggerTypeChange()">
+              <option value="event">Event (lead scored, reply, etc.)</option>
+              <option value="schedule">Schedule (cron)</option>
+            </select>
+            <div id="triggerEventConfig" class="mt-2">
+              <select id="triggerEvent" class="form-select form-select-sm bg-dark text-white border-secondary">
+                <option value="lead_scored">Lead Scored</option>
+                <option value="pipeline_moved">Pipeline Moved</option>
+                <option value="reply_received">Reply Received</option>
+                <option value="email_sent">Email Sent</option>
+                <option value="job_completed">Job Completed</option>
+              </select>
+              <div id="triggerConditions" class="mt-2">
+                <div class="d-flex gap-2 align-items-center mt-1">
+                  <span class="text-muted small">Where</span>
+                  <select id="condKey" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:120px">
+                    <option value="tier">Tier</option>
+                    <option value="score">Score</option>
+                    <option value="category">Category</option>
+                  </select>
+                  <select id="condOp" class="form-select form-select-sm bg-dark text-white border-secondary" style="max-width:80px">
+                    <option value="eq">equals</option>
+                    <option value="gt">greater than</option>
+                    <option value="lt">less than</option>
+                  </select>
+                  <input id="condVal" class="form-control form-control-sm bg-dark text-white border-secondary" style="max-width:100px" placeholder="hot">
+                </div>
+              </div>
+            </div>
+            <div id="triggerScheduleConfig" class="mt-2" style="display:none">
+              <input id="triggerCron" class="form-control form-control-sm bg-dark text-white border-secondary"
+                     placeholder="Cron: 0 9 * * 1 (Mon 9am)">
+              <div class="text-muted" style="font-size:.68rem;margin-top:.3rem">Common: <code>0 9 * * *</code> daily, <code>0 9 * * 1</code> weekly</div>
+            </div>
+          </div>
+
+          <!-- Arrow + Actions -->
+          <div id="wfActionsChain" class="wf-actions-chain"></div>
+          <button class="btn btn-sm btn-outline-primary mt-2" onclick="WorkflowApp.addAction()">
+            <i class="bi bi-plus-lg me-1"></i>Add Action
+          </button>
+        </div>
+      </div>
+      <div class="modal-footer border-secondary">
+        <button class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary btn-sm" onclick="WorkflowApp.saveWorkflow()">
+          <i class="bi bi-check-lg me-1"></i>Save Workflow
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Run History Modal -->
+<div class="modal fade" id="wfRunsModal" tabindex="-1">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content bg-dark text-white border-secondary">
+      <div class="modal-header border-secondary">
+        <h5 class="modal-title" id="wfRunsTitle">Run History</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body p-0">
+        <table class="table table-dark table-hover mb-0 small">
+          <thead><tr><th>Status</th><th>Started</th><th>Actions</th><th>Error</th></tr></thead>
+          <tbody id="wfRunsTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<style>
+.workflow-list { display: flex; flex-direction: column; gap: .75rem }
+.workflow-card {
+  background: var(--card-bg,#1e1e2e); border: 1px solid var(--border-color,rgba(255,255,255,.07));
+  border-radius: 14px; padding: 1.1rem 1.35rem;
+  display: flex; align-items: center; gap: 1.25rem;
+  transition: border-color .2s, box-shadow .2s;
+}
+.workflow-card:hover { border-color: var(--accent,#6366f1); box-shadow: 0 4px 16px rgba(0,0,0,.25) }
+.wf-icon {
+  width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
+  background: rgba(99,102,241,.15); display: flex; align-items: center; justify-content: center;
+  font-size: 1.2rem; color: var(--accent,#6366f1);
+}
+.wf-info { flex: 1 }
+.wf-name { font-weight: 700; font-size: .9rem; margin-bottom: .2rem }
+.wf-meta { font-size: .72rem; color: #888; display: flex; gap: .75rem; flex-wrap: wrap }
+.wf-actions-row { display: flex; gap: .4rem; align-items: center }
+.badge-active   { background: rgba(16,185,129,.2); color: #10b981; border: 1px solid rgba(16,185,129,.3); }
+.badge-paused   { background: rgba(251,191,36,.15); color: #fbbf24; border: 1px solid rgba(251,191,36,.3); }
+.badge-archived { background: rgba(107,114,128,.15); color: #6b7280; }
+
+/* Builder */
+.wf-builder-chain { display: flex; flex-direction: column; gap: .5rem }
+.wf-builder-node {
+  background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1);
+  border-radius: 12px; padding: 1rem;
+}
+.trigger-node { border-color: rgba(99,102,241,.5) }
+.wfn-label { font-size: .68rem; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--accent,#6366f1); margin-bottom: .25rem }
+.wf-action-node { border-color: rgba(16,185,129,.3) }
+.wf-action-node .wfn-label { color: #10b981 }
+.wf-chain-arrow { text-align: center; color: #555; font-size: 1.2rem; line-height: 1 }
+.wf-actions-chain { display: flex; flex-direction: column; gap: .4rem }
+.action-config { margin-top: .5rem }
+.wf-template-btn { font-size: .78rem }
+.wf-templates { overflow-x: auto }
+</style>
+
+<script src="/static/js/workflows.js"></script>
+<script>window.addEventListener('DOMContentLoaded', WorkflowApp.init)</script>
+{% endblock %}

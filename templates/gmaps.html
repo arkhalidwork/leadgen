@@ -10,6 +10,54 @@ endblock %} {% block topbar_title %}
   rel="stylesheet"
   href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css"
 />
+<style>
+  /* ── Per-Row SSE Animations ── */
+
+  /* Slide-in for new lead rows */
+  .lead-row-new {
+    opacity: 0;
+    transform: translateX(-20px);
+    transition: opacity 0.35s ease-out, transform 0.35s ease-out;
+  }
+  .lead-row-new.lead-row-visible {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  /* Green flash when email/contact is found */
+  .contact-found-flash {
+    animation: contactFlash 1.5s ease-out;
+  }
+  @keyframes contactFlash {
+    0% { background-color: rgba(22, 163, 74, 0.25); }
+    100% { background-color: transparent; }
+  }
+
+  /* Row state indicators */
+  tr[data-state="skeleton"] td {
+    opacity: 0.4;
+  }
+  tr[data-state="crawling"] .cell-email::after {
+    content: "";
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    margin-left: 6px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: var(--accent-primary, #4f8cff);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  /* Enriched row subtle left-border accent */
+  tr[data-state="enriched"] {
+    border-left: 3px solid rgba(22, 163, 74, 0.5);
+  }
+</style>
 {% endblock %} {% block content %}
 
 <!-- Search Form -->
@@ -132,22 +180,24 @@ endblock %} {% block topbar_title %}
 
 <!-- Progress Section -->
 <div class="tool-progress-card is-hidden" id="progressSection">
+  <!-- Header with state indicator -->
   <div
     class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2"
   >
-    <h5 class="mb-0 fw-bold tool-title-compact">
-      <span
-        class="spinner-border spinner-border-sm me-2 tool-spinner-gmaps"
-        id="progressSpinner"
-      ></span>
+    <h5 class="mb-0 fw-bold tool-title-compact d-flex align-items-center gap-2">
+      <span class="state-dot state-dot--idle" id="stateDot"></span>
       <span id="progressTitle">Scraping in progress...</span>
+      <!-- Phase 3: Local Agent execution badge -->
+      <span id="executionModeBadge" class="badge-local" style="display:none">
+        <i class="bi bi-laptop me-1"></i>Running on Local Agent
+      </span>
     </h5>
     <div class="d-flex align-items-center gap-3">
       <span class="badge px-3 py-2 tool-elapsed-badge" id="elapsedTimer">
         <i class="bi bi-clock me-1"></i>00:00:00
       </span>
       <button
-        class="btn btn-outline-danger btn-sm"
+        class="btn btn-outline-danger btn-sm action-btn"
         id="btnStop"
         title="Stop Scraping"
       >
@@ -155,38 +205,120 @@ endblock %} {% block topbar_title %}
       </button>
     </div>
   </div>
-  <div class="progress mb-2">
+
+  <!-- Animated progress bar -->
+  <div class="progress mb-1">
     <div
-      class="progress-bar progress-bar-striped progress-bar-animated progress-bar-initial progress-bar-gmaps"
+      class="progress-bar progress-bar-striped progress-bar-animated progress-bar-alive progress-bar-gmaps"
       id="progressBar"
       role="progressbar"
+      style="width: 0%"
     ></div>
   </div>
-  <small class="text-muted" id="progressMessage">Starting...</small>
-  <div id="coverageBadge" class="mt-2 is-hidden"></div>
-  <div id="keywordsExpanded" class="mt-2 is-hidden"></div>
-  <div class="d-flex gap-2 mt-3 flex-wrap is-hidden" id="liveStats">
-    <div class="live-stat-box">
-      <div class="stat-val live-stat-accent-gmaps" id="statAreas">0 / 0</div>
+  <div class="progress-meta">
+    <small class="text-muted" id="progressMessage">Starting...</small>
+    <small class="text-muted fw-semibold" id="progressPercent">0%</small>
+  </div>
+
+  <!-- Live stat cards grid -->
+  <div class="live-stats-grid mb-3" id="liveStats" style="display: none">
+    <div class="live-stat-box-enhanced">
+      <div class="stat-val live-stat-accent-gmaps stat-val-animated" id="statAreas">0 / 0</div>
       <div class="stat-label">Geo Cells</div>
     </div>
-    <div class="live-stat-box">
-      <div class="stat-val live-stat-accent-success" id="statLeads">0</div>
+    <div class="live-stat-box-enhanced">
+      <div class="stat-val live-stat-accent-success stat-val-animated" id="statLeads">0</div>
       <div class="stat-label">Leads</div>
     </div>
-    <div class="live-stat-box">
-      <div class="stat-val live-stat-accent-cyan" id="statWebsites">
-        &mdash;
-      </div>
+    <div class="live-stat-box-enhanced">
+      <div class="stat-val live-stat-accent-cyan stat-val-animated" id="statSpeed">&mdash;</div>
+      <div class="stat-label">Leads/min</div>
+    </div>
+    <div class="live-stat-box-enhanced">
+      <div class="stat-val live-stat-accent-warn stat-val-animated" id="statETA">&mdash;</div>
+      <div class="stat-label">ETA</div>
+    </div>
+  </div>
+
+  <!-- Phase indicator -->
+  <div class="phase-indicator" id="phaseIndicator" style="display: none">
+    <i class="bi bi-activity"></i>
+    <span id="phaseDetail">Initializing extraction...</span>
+  </div>
+
+  <!-- Coverage & keywords badges -->
+  <div id="coverageBadge" class="mt-1 is-hidden"></div>
+  <div id="keywordsExpanded" class="mt-1 is-hidden"></div>
+
+  <!-- Websites stat (appears during contacts phase) -->
+  <div class="mt-2 is-hidden" id="statWebsitesWrap">
+    <div class="live-stat-box-enhanced" style="max-width: 160px">
+      <div class="stat-val live-stat-accent-cyan stat-val-animated" id="statWebsites">&mdash;</div>
       <div class="stat-label">Websites</div>
     </div>
   </div>
+
+  <!-- Live streaming logs -->
   <details class="mt-3" id="progressLogsWrap">
     <summary class="small fw-semibold detail-summary-toggle">
-      Realtime Logs
+      <i class="bi bi-terminal me-1"></i>Realtime Logs
     </summary>
-    <div class="mt-2 tool-progress-logs" id="progressLogs"></div>
+    <div class="mt-2 live-logs" id="progressLogs"></div>
   </details>
+</div>
+
+<!-- Skeleton Loader for Results -->
+<div id="resultsSkeleton" class="is-hidden" style="margin-bottom: 22px">
+  <div class="tool-results-header">
+    <h4 class="mb-0 fw-bold tool-results-title">
+      <i class="bi bi-table me-2"></i>Results
+      <span class="badge bg-primary ms-2">...</span>
+    </h4>
+  </div>
+  <div class="skeleton-results-wrap">
+    <div class="skeleton-row" style="background: var(--surface-0)">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+    <div class="skeleton-row">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+    <div class="skeleton-row">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+    <div class="skeleton-row">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+    <div class="skeleton-row">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+    <div class="skeleton-row">
+      <div class="skeleton skeleton-text" style="width: 30px; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="flex: 2; margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+      <div class="skeleton skeleton-text" style="margin: 0"></div>
+    </div>
+  </div>
 </div>
 
 <!-- Results Section -->
@@ -209,7 +341,7 @@ endblock %} {% block topbar_title %}
       >
         <i class="bi bi-play-circle me-1"></i>Start Contact Retrieval
       </button>
-      <button class="btn btn-success btn-sm" id="btnDownload">
+      <button class="btn btn-success btn-sm action-btn" id="btnDownload">
         <i class="bi bi-download me-1"></i>Download CSV
       </button>
     </div>
